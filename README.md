@@ -3,7 +3,9 @@
 Mini app local para criar/editar projetos do portfolio com:
 - leitura e escrita dos JSON reais (`pt`, `en`, `es`)
 - upload multiplo de imagens com ordenacao
+- conversao/otimizacao de novos uploads para WebP (thumb + galeria)
 - validacao de campos obrigatorios e unicidade de slug
+- descricao com editor rich text (toolbar + modo HTML)
 - copia de imagens para os diretorios reais usados pelo portfolio em producao
 
 ## 1) Configuracao
@@ -18,6 +20,10 @@ Variaveis principais:
 - `PROJECTS_PT_PATH`, `PROJECTS_EN_PATH`, `PROJECTS_ES_PATH`: arquivos JSON reais
 - `PROJECTS_ASSETS_DIR`: base de imagens de projetos
 - `PROJECTS_THUMBS_DIR`: pasta de thumbs
+- `THUMB_MAX_WIDTH`: largura maxima para thumbs (sem upscale)
+- `GALLERY_MAX_WIDTH`: largura maxima para imagens de galeria (sem upscale)
+- `WEBP_QUALITY`: qualidade WebP aplicada nos novos uploads
+- `ENABLE_INLINE_STYLE`: permite atributo `style` no HTML sanitizado da descricao
 
 ### Web (Vite + React)
 Opcionalmente crie `web/.env`:
@@ -52,9 +58,10 @@ App web: `http://localhost:5173`
    - datas e links
    - stacks/tecnologias (`class` + `tooltip`)
    - titulo/descricao para `pt`, `en`, `es`
-4. Faça upload da thumbnail e imagens da galeria.
+4. Faça upload da thumbnail e imagens da galeria (novos arquivos sao convertidos para `.webp` no backend).
 5. Reordene as imagens da galeria com as setas.
-6. Clique em **Criar projeto** ou **Salvar edicao**.
+6. Edite descricao no rich text (atalhos comuns: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
+7. Clique em **Criar projeto** ou **Salvar edicao**.
 
 ## 4) Endpoints da API
 
@@ -74,3 +81,4 @@ App web: `http://localhost:5173`
 - slug unico por locale (derivado de `title`)
 - categoria precisa existir nos JSONs reais
 - paths de arquivos sempre resolvidos dentro da raiz configurada do portfolio
+- sanitizacao de `description` no backend (remocao de conteudo perigoso, com whitelist)

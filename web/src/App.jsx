@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
+import {
+  faArrowDown,
+  faArrowUp,
+  faCopy,
+  faFloppyDisk,
+  faPlus,
+  faRotate,
+  faTrash,
+} from '@fortawesome/free-solid-svg-icons';
 import './App.css';
+import IconButton from './components/IconButton';
+import RichTextEditor from './components/RichTextEditor';
+import { sanitizeRichTextHtml } from './components/richTextSanitize';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3333';
 const DEFAULT_LOCALES = ['pt', 'en', 'es'];
@@ -48,6 +60,35 @@ function revokeObjectUrls(form) {
 function toAssetPreviewUrl(relativePath) {
   if (!relativePath) return '';
   return `${API_BASE}/api/image?path=${encodeURIComponent(relativePath)}`;
+}
+
+function getStackIconFileName(iconClass) {
+  if (!iconClass) return '';
+  if (iconClass === 'c') return 'C.svg';
+  return `${iconClass}.svg`;
+}
+
+function StackIcon({ iconClass, alt }) {
+  const fileName = getStackIconFileName(iconClass);
+  const sources = useMemo(() => {
+    if (!fileName) return [];
+    return [
+      `${API_BASE}/api/image?path=${encodeURIComponent(`assets/icons/skills/${fileName}`)}`,
+      `/stack-icons/${fileName}`,
+    ];
+  }, [fileName]);
+
+  const [index, setIndex] = useState(0);
+
+  if (!sources.length || index >= sources.length) return null;
+  return (
+    <img
+      className="stack-icon"
+      src={sources[index]}
+      alt={alt || iconClass}
+      onError={() => setIndex((value) => value + 1)}
+    />
+  );
 }
 
 async function apiRequest(endpoint, options = {}) {
@@ -212,12 +253,11 @@ function App() {
       if (current.common.icons.some((icon) => icon.class === iconClass)) {
         return current;
       }
-      const tooltip = iconClass.toUpperCase();
       return {
         ...current,
         common: {
           ...current.common,
-          icons: [...current.common.icons, { class: iconClass, tooltip }],
+          icons: [...current.common.icons, { class: iconClass, tooltip: iconClass.toUpperCase() }],
         },
       };
     });
@@ -356,17 +396,21 @@ function App() {
     if (!form.category) validationErrors.push('Selecione uma categoria.');
     if (!form.assetFolder.trim()) validationErrors.push('Preencha o identificador da pasta de imagens.');
 
-    DEFAULT_LOCALES.forEach((locale) => {
-      if (!form.locales[locale]?.title?.trim()) {
-        validationErrors.push(`Título do locale ${locale.toUpperCase()} é obrigatório.`);
+    const sanitizedLocales = DEFAULT_LOCALES.reduce((accumulator, locale) => {
+      const title = (form.locales[locale]?.title || '').trim();
+      const description = sanitizeRichTextHtml(form.locales[locale]?.description || '');
+      accumulator[locale] = { title, description };
+      if (!title) {
+        validationErrors.push(`Titulo do locale ${locale.toUpperCase()} eh obrigatorio.`);
       }
-      if (!form.locales[locale]?.description?.trim()) {
-        validationErrors.push(`Descrição do locale ${locale.toUpperCase()} é obrigatória.`);
+      if (!description.trim()) {
+        validationErrors.push(`Descricao do locale ${locale.toUpperCase()} eh obrigatoria.`);
       }
-    });
+      return accumulator;
+    }, {});
 
-    if (!form.common.initialDate.trim()) validationErrors.push('Data inicial é obrigatória.');
-    if (!form.common.endDate.trim()) validationErrors.push('Data final é obrigatória.');
+    if (!form.common.initialDate.trim()) validationErrors.push('Data inicial eh obrigatoria.');
+    if (!form.common.endDate.trim()) validationErrors.push('Data final eh obrigatoria.');
     if (!Array.isArray(form.common.icons) || form.common.icons.length === 0) {
       validationErrors.push('Adicione ao menos 1 stack/tecnologia.');
     }
@@ -400,6 +444,7 @@ function App() {
     return {
       validationErrors,
       normalizedIcons,
+      sanitizedLocales,
     };
   };
 
@@ -407,7 +452,7 @@ function App() {
     setError('');
     setFeedback('');
 
-    const { validationErrors, normalizedIcons } = validateBeforeSave();
+    const { validationErrors, normalizedIcons, sanitizedLocales } = validateBeforeSave();
     if (validationErrors.length > 0) {
       setError(validationErrors.join(' '));
       return;
@@ -422,13 +467,7 @@ function App() {
         developingPorcentage: Number(form.common.developingPorcentage),
         icons: normalizedIcons,
       },
-      locales: DEFAULT_LOCALES.reduce((accumulator, locale) => {
-        accumulator[locale] = {
-          title: form.locales[locale].title.trim(),
-          description: form.locales[locale].description.trim(),
-        };
-        return accumulator;
-      }, {}),
+      locales: sanitizedLocales,
       galleryPlan: form.gallery.map((image) =>
         image.kind === 'existing'
           ? { kind: 'existing', path: image.path }
@@ -483,12 +522,12 @@ function App() {
       <header className="topbar">
         <h1>Portfolio Project Uploader</h1>
         <div className="topbar-actions">
-          <button type="button" className="secondary-btn" onClick={resetForCreate}>
-            Novo Projeto
-          </button>
-          <button type="button" className="secondary-btn" onClick={loadMetaAndProjects}>
+          <IconButton icon={faPlus} variant="secondary" onClick={resetForCreate}>
+            Novo projeto
+          </IconButton>
+          <IconButton icon={faRotate} variant="secondary" onClick={loadMetaAndProjects}>
             Recarregar
-          </button>
+          </IconButton>
         </div>
       </header>
 
@@ -534,12 +573,15 @@ function App() {
                 onClick={() => loadProjectForEdit(project.slug)}
               >
                 <img src={toAssetPreviewUrl(project.image)} alt={project.title} />
-                <div>
+                <div className="project-card-body">
                   <strong>{project.title}</strong>
                   <small>
                     {project.category} · {project.slug}
                   </small>
                 </div>
+                <span className="project-card-edit" aria-hidden="true">
+                  ✎
+                </span>
               </button>
             ))}
           </div>
@@ -547,7 +589,7 @@ function App() {
 
         <section className="editor-panel">
           <div className="panel-header">
-            <h2>{mode === 'create' ? 'Criar Projeto' : `Editar: ${selectedSlug}`}</h2>
+            <h2>{mode === 'create' ? 'Criar projeto' : `Editar: ${selectedSlug}`}</h2>
           </div>
 
           <div className="form-grid">
@@ -573,7 +615,7 @@ function App() {
             </label>
 
             <label>
-              Pasta de imagens
+              Pasta de imagens (assetFolder)
               <input
                 className="input"
                 value={form.assetFolder}
@@ -673,20 +715,16 @@ function App() {
           <section className="block">
             <div className="block-header">
               <h3>Stacks / Tecnologias</h3>
-              <button type="button" className="secondary-btn" onClick={addCustomIcon}>
-                + Custom
-              </button>
+              <IconButton icon={faPlus} variant="secondary" onClick={addCustomIcon}>
+                Stack custom
+              </IconButton>
             </div>
 
             <div className="icon-pills">
               {meta.knownIcons.map((iconClass) => (
-                <button
-                  key={iconClass}
-                  type="button"
-                  className="pill"
-                  onClick={() => addKnownIcon(iconClass)}
-                >
-                  {iconClass}
+                <button key={iconClass} type="button" className="pill" onClick={() => addKnownIcon(iconClass)}>
+                  <StackIcon key={`known-${iconClass}`} iconClass={iconClass} alt={iconClass} />
+                  <span>{iconClass}</span>
                 </button>
               ))}
             </div>
@@ -694,6 +732,9 @@ function App() {
             <div className="icon-list">
               {form.common.icons.map((icon, index) => (
                 <div key={`icon-${index}`} className="icon-row">
+                  <div className="icon-preview">
+                    <StackIcon key={`preview-${icon.class}-${index}`} iconClass={icon.class} alt={icon.class || 'stack'} />
+                  </div>
                   <input
                     className="input"
                     placeholder="class"
@@ -706,9 +747,13 @@ function App() {
                     value={icon.tooltip}
                     onChange={(event) => updateIcon(index, 'tooltip', event.target.value)}
                   />
-                  <button type="button" className="danger-btn" onClick={() => removeIcon(index)}>
-                    Remover
-                  </button>
+                  <IconButton
+                    icon={faTrash}
+                    variant="danger"
+                    iconOnly
+                    ariaLabel="Remover stack"
+                    onClick={() => removeIcon(index)}
+                  />
                 </div>
               ))}
             </div>
@@ -717,9 +762,9 @@ function App() {
           <section className="block">
             <div className="block-header">
               <h3>Conteudo por idioma</h3>
-              <button type="button" className="secondary-btn" onClick={copyPtToOtherLocales}>
+              <IconButton icon={faCopy} variant="secondary" onClick={copyPtToOtherLocales}>
                 Copiar PT para EN/ES
-              </button>
+              </IconButton>
             </div>
 
             <div className="locale-tabs">
@@ -747,12 +792,9 @@ function App() {
 
               <label>
                 Descricao HTML ({activeLocale.toUpperCase()})
-                <textarea
-                  className="input textarea"
+                <RichTextEditor
                   value={form.locales[activeLocale]?.description || ''}
-                  onChange={(event) =>
-                    updateLocaleField(activeLocale, 'description', event.target.value)
-                  }
+                  onChange={(nextHtml) => updateLocaleField(activeLocale, 'description', nextHtml)}
                 />
               </label>
             </div>
@@ -761,9 +803,9 @@ function App() {
           <section className="block">
             <div className="block-header">
               <h3>Thumbnail</h3>
-              <button type="button" className="danger-btn" onClick={clearThumbnail}>
+              <IconButton icon={faTrash} variant="danger" onClick={clearThumbnail}>
                 Limpar
-              </button>
+              </IconButton>
             </div>
 
             <input
@@ -802,15 +844,25 @@ function App() {
                     <small>{image.kind === 'new' ? 'nova' : 'existente'}</small>
                   </div>
                   <div className="gallery-actions">
-                    <button type="button" className="secondary-btn" onClick={() => moveGalleryImage(index, -1)}>
-                      ↑
-                    </button>
-                    <button type="button" className="secondary-btn" onClick={() => moveGalleryImage(index, 1)}>
-                      ↓
-                    </button>
-                    <button type="button" className="danger-btn" onClick={() => removeGalleryImage(image.id)}>
-                      Remover
-                    </button>
+                    <IconButton
+                      icon={faArrowUp}
+                      iconOnly
+                      ariaLabel="Mover imagem para cima"
+                      onClick={() => moveGalleryImage(index, -1)}
+                    />
+                    <IconButton
+                      icon={faArrowDown}
+                      iconOnly
+                      ariaLabel="Mover imagem para baixo"
+                      onClick={() => moveGalleryImage(index, 1)}
+                    />
+                    <IconButton
+                      icon={faTrash}
+                      variant="danger"
+                      iconOnly
+                      ariaLabel="Remover imagem"
+                      onClick={() => removeGalleryImage(image.id)}
+                    />
                   </div>
                 </article>
               ))}
@@ -818,9 +870,9 @@ function App() {
           </section>
 
           <div className="submit-row">
-            <button type="button" className="primary-btn" disabled={isSaving} onClick={saveProject}>
+            <IconButton icon={faFloppyDisk} variant="primary" disabled={isSaving} onClick={saveProject}>
               {isSaving ? 'Salvando...' : mode === 'create' ? 'Criar projeto' : 'Salvar edicao'}
-            </button>
+            </IconButton>
           </div>
         </section>
       </main>

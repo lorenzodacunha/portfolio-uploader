@@ -6,6 +6,8 @@ const cors = require('cors');
 const multer = require('multer');
 const slugify = require('slugify');
 const dotenv = require('dotenv');
+const sharp = require('sharp');
+const sanitizeHtml = require('sanitize-html');
 
 dotenv.config({ path: path.join(__dirname, '.env') });
 
@@ -13,6 +15,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3333);
 const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 20);
 const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 40);
+const THUMB_MAX_WIDTH = Number(process.env.THUMB_MAX_WIDTH || 800);
+const GALLERY_MAX_WIDTH = Number(process.env.GALLERY_MAX_WIDTH || 2000);
+const WEBP_QUALITY = Number(process.env.WEBP_QUALITY || 82);
 
 const PORTFOLIO_ROOT = path.resolve(
   process.env.PORTFOLIO_ROOT || path.resolve(__dirname, '..', '..', 'Portfolio Produção')
@@ -28,6 +33,7 @@ const PROJECTS_FILE_BY_LOCALE = {
 const PROJECTS_ASSETS_DIR = (process.env.PROJECTS_ASSETS_DIR || 'assets/images/projects').replace(/\\/g, '/');
 const PROJECTS_THUMBS_DIR = (process.env.PROJECTS_THUMBS_DIR || 'assets/images/projects/thumbs').replace(/\\/g, '/');
 const ICONS_FILE_PATH = process.env.ICONS_FILE_PATH || 'js/icons.js';
+const ENABLE_INLINE_STYLE = String(process.env.ENABLE_INLINE_STYLE || 'false').toLowerCase() === 'true';
 
 const PROJECT_FIELD_ORDER = [
   'title',
@@ -131,6 +137,63 @@ function parseTaggedFilename(filename) {
   };
 }
 
+function sanitizeProjectDescription(rawHtml) {
+  return sanitizeHtml(String(rawHtml || ''), {
+    allowedTags: [
+      'p',
+      'br',
+      'strong',
+      'b',
+      'em',
+      'i',
+      'u',
+      'span',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'ul',
+      'ol',
+      'li',
+      'blockquote',
+      'a',
+      'table',
+      'thead',
+      'tbody',
+      'tr',
+      'th',
+      'td',
+      'img',
+      'iframe',
+      'hr',
+    ],
+    allowedAttributes: {
+      a: ['href', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      iframe: ['src', 'width', 'height', 'frameborder', 'allow', 'allowfullscreen', 'title'],
+      '*': ENABLE_INLINE_STYLE ? ['style'] : [],
+    },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedIframeHostnames: ['youtube.com', 'www.youtube.com', 'youtu.be', 'player.vimeo.com', 'vimeo.com'],
+    allowProtocolRelative: false,
+    parser: {
+      lowerCaseTags: true,
+    },
+    transformTags: {
+      a: (tagName, attribs) => {
+        const next = { ...attribs };
+        if (next.href && /^https?:\/\//i.test(next.href)) {
+          next.target = '_blank';
+          next.rel = 'noopener noreferrer';
+        }
+        return { tagName, attribs: next };
+      },
+    },
+  });
+}
+
 function parsePayload(rawPayload) {
   if (!rawPayload) {
     throw createHttpError(400, 'Payload ausente. Envie o campo "payload" no multipart/form-data.');
@@ -176,7 +239,7 @@ function buildProjectObject(existingProject, localeInput, commonInput, thumbnail
   const merged = {
     ...base,
     title: localeInput.title.trim(),
-    description: localeInput.description.trim(),
+    description: sanitizeProjectDescription(localeInput.description),
     image: thumbnailPath,
     initialDate: commonInput.initialDate.trim(),
     endDate: commonInput.endDate.trim(),
@@ -292,10 +355,9 @@ function collectUploadedFilesMap(filesByField) {
     if (map.has(parsed.fileId)) {
       throw createHttpError(400, `Arquivo duplicado para id "${parsed.fileId}".`);
     }
-    const extension = path.extname(parsed.originalName || '').toLowerCase() || '.webp';
     map.set(parsed.fileId, {
       ...file,
-      extension,
+      extension: '.webp',
       normalizedOriginalName: parsed.originalName,
     });
   }
@@ -312,12 +374,40 @@ async function fileExists(absolutePath) {
   }
 }
 
+async function processImageToWebp(buffer, width) {
+  try {
+    return await sharp(buffer)
+      .rotate()
+      .resize({
+        width,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .webp({
+        quality: WEBP_QUALITY,
+        effort: 4,
+      })
+      .toBuffer();
+  } catch {
+    throw createHttpError(400, 'Nao foi possivel processar a imagem enviada.');
+  }
+}
+
+async function processThumbnailToWebp(buffer) {
+  return processImageToWebp(buffer, THUMB_MAX_WIDTH);
+}
+
+async function processGalleryToWebp(buffer) {
+  return processImageToWebp(buffer, GALLERY_MAX_WIDTH);
+}
+
 async function saveNewImageFile({
   file,
   targetRelativeDir,
   baseName,
   useNumericSequence,
   numericStart = 1,
+  processedBuffer,
 }) {
   const absoluteDir = resolvePortfolioPath(targetRelativeDir);
   await fsPromises.mkdir(absoluteDir, { recursive: true });
@@ -352,7 +442,7 @@ async function saveNewImageFile({
     }
   }
 
-  await fsPromises.writeFile(candidateAbsolutePath, file.buffer);
+  await fsPromises.writeFile(candidateAbsolutePath, processedBuffer || file.buffer);
 
   return {
     relativePath: candidateRelativePath,
@@ -527,12 +617,14 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
     if (!file) {
       throw createHttpError(400, `Arquivo para gallery fileId "${item.fileId}" não foi enviado.`);
     }
+    const galleryBuffer = await processGalleryToWebp(file.buffer);
     const saved = await saveNewImageFile({
       file,
       targetRelativeDir: galleryTargetDir,
       baseName: assetFolder,
       useNumericSequence: true,
       numericStart: nextNumericName,
+      processedBuffer: galleryBuffer,
     });
     nextNumericName = saved.nextIndex;
     galleryPaths.push(saved.relativePath);
@@ -552,11 +644,13 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
         `Arquivo para thumbnail fileId "${payload.thumbnailPlan.fileId}" não foi enviado.`
       );
     }
+    const thumbBuffer = await processThumbnailToWebp(file.buffer);
     const saved = await saveNewImageFile({
       file,
       targetRelativeDir: PROJECTS_THUMBS_DIR,
       baseName: assetFolder,
       useNumericSequence: false,
+      processedBuffer: thumbBuffer,
     });
     thumbnailPath = saved.relativePath;
   }
@@ -936,6 +1030,11 @@ async function bootstrap() {
   app.listen(PORT, () => {
     console.log('[uploader-api] running on http://localhost:' + PORT);
     console.log('[uploader-api] portfolio root:', PORTFOLIO_ROOT);
+    console.log('[uploader-api] image profile:', {
+      thumbWidth: THUMB_MAX_WIDTH,
+      galleryWidth: GALLERY_MAX_WIDTH,
+      webpQuality: WEBP_QUALITY,
+    });
   });
 }
 

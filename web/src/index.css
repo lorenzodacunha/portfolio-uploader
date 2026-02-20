@@ -1,0 +1,36 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  --bg-main: #2f2f2f;
+  --panel: #252525;
+  --panel-alt: #202020;
+  --input: #3a3a3a;
+  --line: #e7d8bc;
+  --text: #ffffff;
+  --text-button: #202020;
+  --muted: #FFC37D;
+  --muted-alt: #6e6e6e;
+  --accent: #e0692f;
+  --accent-strong: #c7541a;
+  --danger: #b5412a;
+  --danger-bg: #ffe7df;
+  --primary-color: #FFA030;
+  --secondary-color: #FFC37D;
+  --really-black-orange: #ff951a;
+  --extreme-black-orange: #ff8a00;
+  --gap: 16px;
+  --border-radius: 20px;
+  --padding: 16px;
+  --margin: 16px;
+  font-family: "Inter", sans-serif;
+  letter-spacing: .5px;
+}

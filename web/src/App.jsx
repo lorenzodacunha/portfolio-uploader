@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  faArrowDown,
-  faArrowUp,
   faCopy,
   faFloppyDisk,
+  faGripVertical,
   faPlus,
   faRotate,
   faTrash,
 } from '@fortawesome/free-solid-svg-icons';
 import './App.css';
+import FileUploadDropzone from './components/FileUploadDropzone';
 import IconButton from './components/IconButton';
 import RichTextEditor from './components/RichTextEditor';
 import { sanitizeRichTextHtml } from './components/richTextSanitize';
@@ -117,6 +117,7 @@ function App() {
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
   const [form, setForm] = useState(emptyForm());
+  const [draggingGalleryId, setDraggingGalleryId] = useState('');
 
   const replaceForm = (nextForm) => {
     setForm((previous) => {
@@ -327,14 +328,15 @@ function App() {
     });
   };
 
-  const moveGalleryImage = (imageIndex, direction) => {
+  const moveGalleryImageByDrag = (fromId, toId) => {
+    if (!fromId || !toId || fromId === toId) return;
     setForm((current) => {
-      const nextIndex = imageIndex + direction;
-      if (nextIndex < 0 || nextIndex >= current.gallery.length) return current;
+      const fromIndex = current.gallery.findIndex((item) => item.id === fromId);
+      const toIndex = current.gallery.findIndex((item) => item.id === toId);
+      if (fromIndex < 0 || toIndex < 0) return current;
       const reordered = [...current.gallery];
-      const temp = reordered[imageIndex];
-      reordered[imageIndex] = reordered[nextIndex];
-      reordered[nextIndex] = temp;
+      const [moved] = reordered.splice(fromIndex, 1);
+      reordered.splice(toIndex, 0, moved);
       return {
         ...current,
         gallery: reordered,
@@ -615,7 +617,7 @@ function App() {
             </label>
 
             <label>
-              Pasta de imagens (assetFolder)
+              Pasta de imagens
               <input
                 className="input"
                 value={form.assetFolder}
@@ -790,13 +792,13 @@ function App() {
                 />
               </label>
 
-              <label>
-                Descricao HTML ({activeLocale.toUpperCase()})
+              <div className="field-block">
+                <span>Descricao HTML ({activeLocale.toUpperCase()})</span>
                 <RichTextEditor
                   value={form.locales[activeLocale]?.description || ''}
                   onChange={(nextHtml) => updateLocaleField(activeLocale, 'description', nextHtml)}
                 />
-              </label>
+              </div>
             </div>
           </section>
 
@@ -808,11 +810,13 @@ function App() {
               </IconButton>
             </div>
 
-            <input
-              className="input"
-              type="file"
+            <FileUploadDropzone
+              id="thumbnail-upload"
               accept="image/*"
-              onChange={(event) => setNewThumbnail(event.target.files?.[0])}
+              title="Arraste e solte a thumbnail"
+              browseLabel="Procurar"
+              helperText="PNG, JPG ou WEBP"
+              onFilesSelected={(files) => setNewThumbnail(files?.[0])}
             />
 
             {form.thumbnail.preview ? (
@@ -827,35 +831,53 @@ function App() {
               <h3>Galeria de imagens</h3>
             </div>
 
-            <input
-              className="input"
-              type="file"
+            <FileUploadDropzone
+              id="gallery-upload"
               accept="image/*"
               multiple
-              onChange={(event) => addGalleryFiles(event.target.files)}
+              title="Arraste e solte as imagens da galeria"
+              browseLabel="Escolher imagens"
+              helperText="Seleção multipla habilitada"
+              onFilesSelected={addGalleryFiles}
             />
 
             <div className="gallery-list">
               {form.gallery.map((image, index) => (
-                <article key={image.id} className="gallery-item">
+                <article
+                  key={image.id}
+                  className={`gallery-item ${draggingGalleryId === image.id ? 'is-dragging' : ''}`}
+                  draggable
+                  onDragStart={(event) => {
+                    setDraggingGalleryId(image.id);
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('text/plain', image.id);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const fromId = event.dataTransfer.getData('text/plain') || draggingGalleryId;
+                    moveGalleryImageByDrag(fromId, image.id);
+                    setDraggingGalleryId('');
+                  }}
+                  onDragEnd={() => setDraggingGalleryId('')}
+                >
+                  <span className="gallery-drag-handle" aria-hidden="true">
+                    <IconButton
+                      icon={faGripVertical}
+                      iconOnly
+                      ariaLabel={`Arrastar imagem ${index + 1}`}
+                      className="drag-handle-btn"
+                    />
+                  </span>
                   <img src={image.preview} alt={image.name || `imagem-${index + 1}`} />
                   <div className="gallery-meta">
                     <strong>{image.name || image.path}</strong>
                     <small>{image.kind === 'new' ? 'nova' : 'existente'}</small>
                   </div>
                   <div className="gallery-actions">
-                    <IconButton
-                      icon={faArrowUp}
-                      iconOnly
-                      ariaLabel="Mover imagem para cima"
-                      onClick={() => moveGalleryImage(index, -1)}
-                    />
-                    <IconButton
-                      icon={faArrowDown}
-                      iconOnly
-                      ariaLabel="Mover imagem para baixo"
-                      onClick={() => moveGalleryImage(index, 1)}
-                    />
                     <IconButton
                       icon={faTrash}
                       variant="danger"

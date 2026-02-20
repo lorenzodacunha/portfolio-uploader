@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -87,6 +87,7 @@ function RichTextEditor({ value, onChange }) {
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceHtml, setSourceHtml] = useState(value || '');
   const [currentColor, setCurrentColor] = useState('#1f2937');
+  const lastEditorHtmlRef = useRef(sanitizeRichTextHtml(value || ''));
 
   const extensions = useMemo(
     () => [
@@ -153,6 +154,7 @@ function RichTextEditor({ value, onChange }) {
     },
     onUpdate({ editor: nextEditor }) {
       const html = sanitizeRichTextHtml(nextEditor.getHTML());
+      lastEditorHtmlRef.current = html;
       onChange(html);
       if (!sourceMode) {
         setSourceHtml(html);
@@ -163,9 +165,9 @@ function RichTextEditor({ value, onChange }) {
   useEffect(() => {
     if (!editor) return;
     const incoming = sanitizeRichTextHtml(value || '');
-    const current = sanitizeRichTextHtml(editor.getHTML());
-    if (incoming !== current) {
+    if (incoming !== lastEditorHtmlRef.current) {
       editor.commands.setContent(incoming, false);
+      lastEditorHtmlRef.current = incoming;
     }
     if (!sourceMode) {
       setSourceHtml(incoming);

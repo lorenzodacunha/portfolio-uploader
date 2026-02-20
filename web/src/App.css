@@ -68,7 +68,7 @@
 }
 
 .input:focus {
-  outline: 2px solid rgba(224, 105, 47, 0.35);
+  outline: 2px solid var(--accent);
   border-color: var(--accent);
 }
 
@@ -89,6 +89,49 @@
   max-height: 100vh;
   overflow-y: auto;
   padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: #b7b7b7 #2f2f2f;
+}
+
+.project-cards::-webkit-scrollbar {
+  width: 12px;
+}
+
+.project-cards::-webkit-scrollbar-track {
+  background: #2f2f2f;
+  border-radius: 999px;
+}
+
+.project-cards::-webkit-scrollbar-thumb {
+  background: #b7b7b7;
+  border-radius: 999px;
+  border: 2px solid #2f2f2f;
+}
+
+.project-cards::-webkit-scrollbar-thumb:hover {
+  background: #c6c6c6;
+}
+
+.project-cards::-webkit-scrollbar-button:single-button {
+  display: block;
+  height: 12px;
+  background-color: #2f2f2f;
+}
+
+.project-cards::-webkit-scrollbar-button:single-button:vertical:decrement {
+  border-style: solid;
+  border-width: 0 5px 6px 5px;
+  border-color: transparent transparent #9d9d9d transparent;
+}
+
+.project-cards::-webkit-scrollbar-button:single-button:vertical:increment {
+  border-style: solid;
+  border-width: 6px 5px 0 5px;
+  border-color: #9d9d9d transparent transparent transparent;
+}
+
+.project-cards::-webkit-scrollbar-button:single-button:hover {
+  background-color: #383838;
 }
 
 .project-card {
@@ -229,8 +272,9 @@
   height: 150px;
   object-fit: cover;
   border-radius: 10px;
-  border: 1px solid #d7c8af;
-  margin-top: 9px;
+  margin-top: var(--margin);
+  box-shadow: #00000059 0px 0px 8px 0px;
+  border: none;
 }
 
 .gallery-list {
@@ -241,13 +285,32 @@
 
 .gallery-item {
   display: grid;
-  grid-template-columns: 92px 1fr auto;
+  grid-template-columns: 34px 92px 1fr auto;
   gap: 10px;
   align-items: center;
   border: 1px solid #e7d7bd;
   border-radius: 10px;
   background: #fff;
   padding: 7px;
+}
+
+.gallery-item.is-dragging {
+  opacity: 0.62;
+  border-color: var(--accent, #e0692f);
+}
+
+.gallery-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.drag-handle-btn {
+  cursor: grab;
+}
+
+.drag-handle-btn:active {
+  cursor: grabbing;
 }
 
 .gallery-item img {
@@ -272,6 +335,7 @@
 .gallery-actions {
   display: flex;
   gap: 6px;
+  justify-self: end;
 }
 
 .submit-row {
@@ -391,14 +455,15 @@
 }
 
 .icon-btn {
-  border-radius: 5px;
+  border-radius: var(--border-radius);
   cursor: pointer;
-  padding: 8px 12px;
+  padding: 10px;
   font: inherit;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   border: none;
+  font-weight: 600;
 }
 
 .icon-btn:hover {
@@ -406,7 +471,7 @@
 }
 
 .icon-btn:focus-visible {
-  outline: 2px solid rgba(224, 105, 47, 0.35);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
@@ -415,6 +480,8 @@
   width: 36px;
   height: 36px;
   justify-content: center;
+  border-radius: 5px;
+  background-color: transparent;
 }
 
 .icon-btn-primary {
@@ -428,12 +495,12 @@
 }
 
 .icon-btn-secondary {
-  background: #fff;
-  color: var(--text-button, var(--text, #382f1f));
+  background-color: var(--secondary-color);
+  color: #000000;
 }
 
 .icon-btn-danger {
-  background: var(--danger-bg, #ffe7df);
+  background: transparent;
   color: var(--danger, #b5412a);
 }
 
@@ -456,24 +523,28 @@
   background: #dbdbdb;
   border: none;
 }
+.rich-toolbar .icon-btn.icon-only {
+  background-color: white;
+}
 
 .rich-select {
-  border: 1px solid #d9cbb2;
-  border-radius: 8px;
-  padding: 6px 8px;
+  border-radius: 5px;
+  padding: 8px;
   background: #fff;
+  height: 36px;
+  border: none;
 }
 
 .color-picker-label {
-  border: 1px solid #d9cbb2;
-  border-radius: 8px;
-  padding: 3px 7px;
+  border-radius: 5px;
+  padding: 8px;
   background: #fff;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   cursor: pointer;
   font-weight: 600;
+  height: 36px;
 }
 
 .color-picker-label input {
@@ -523,17 +594,17 @@
 }
 
 .more-menu-trigger {
-  border: 1px solid #d9cbb2;
-  border-radius: 8px;
+  border-radius: 5px;
   background: #fff;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   font-size: 20px;
   line-height: 1;
+  border: none;
 }
 
 .more-menu-content {
@@ -551,6 +622,75 @@
   box-shadow: 0 18px 40px rgba(72, 46, 16, 0.12);
 }
 
+/* Dropzone upload (thumb + galeria) */
+.file-upload-form {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.file-upload-label input {
+  display: none;
+}
+
+.file-upload-label {
+  width: 100%;
+  cursor: pointer;
+  background-color: var(--input);
+  padding: var(--padding);
+  border-radius: calc(var(--border-radius)/2);
+  color: #5f533f;
+  display: block;
+  border: none;
+
+}
+
+.file-upload-design {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  text-align: center;
+  border: 2px dashed #484848;
+  border-radius: var(--border-radius);
+  padding: var(--padding);
+  max-width: 250px;
+  margin: auto;
+  background-color: #252525;
+  color: white;
+  box-shadow: 0 10px 24px -20px rgba(0, 0, 0, 0.45);
+
+}
+
+.file-upload-design p {
+  margin: 0;
+}
+
+.file-upload-design svg {
+  height: 44px;
+  fill: #ffffff;
+  margin-bottom: 8px;
+}
+
+.browse-button {
+  background-color: #f2e8d8;
+  padding: 6px 12px;
+  border-radius: 8px;
+  color: #4a3f2e;
+  transition: all 0.2s ease;
+  font-weight: 600;
+}
+
+.browse-button:hover {
+  background-color: #ebd9bf;
+}
+
+.file-upload-helper {
+  margin-top: 4px;
+  color: var(--muted, #7e7058);
+}
+
 .source-mode-wrap {
   padding: 10px;
 }
@@ -558,7 +698,7 @@
 .source-editor {
   width: 100%;
   min-height: 180px;
-  border: 1px solid #d9cbb2;
+  border: 2px solid #dbdbdb;
   border-radius: 8px;
   padding: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;

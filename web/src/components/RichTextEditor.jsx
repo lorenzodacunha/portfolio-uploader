@@ -93,6 +93,9 @@ function RichTextEditor({ value, onChange }) {
     () => [
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
+        link: false,
+        underline: false,
+        hardBreak: false,
       }),
       Underline.extend({
         addKeyboardShortcuts() {

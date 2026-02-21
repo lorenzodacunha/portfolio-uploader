@@ -15,13 +15,18 @@ const app = express();
 const PORT = Number(process.env.PORT || 3333);
 const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 20);
 const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 40);
-const THUMB_MAX_WIDTH = Number(process.env.THUMB_MAX_WIDTH || 800);
+const THUMB_TARGET_WIDTH = Number(process.env.THUMB_TARGET_WIDTH || 248);
+const THUMB_CARD_ASPECT_RATIO = Number(process.env.THUMB_CARD_ASPECT_RATIO || (195 / 113));
 const GALLERY_MAX_WIDTH = Number(process.env.GALLERY_MAX_WIDTH || 2000);
 const WEBP_QUALITY = Number(process.env.WEBP_QUALITY || 82);
 const OLLAMA_URL = String(process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '');
 const OLLAMA_MODEL = String(process.env.OLLAMA_MODEL || 'llama3.1:70b').trim();
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 300000);
 const OLLAMA_MAX_RETRIES = 2;
+const THUMB_TARGET_HEIGHT = Math.max(
+  1,
+  Math.round(THUMB_TARGET_WIDTH / Math.max(0.1, THUMB_CARD_ASPECT_RATIO))
+);
 
 const PORTFOLIO_ROOT = path.resolve(
   process.env.PORTFOLIO_ROOT || path.resolve(__dirname, '..', '..', 'Portfolio Produção')
@@ -402,11 +407,88 @@ async function processImageToWebp(buffer, width) {
 }
 
 async function processThumbnailToWebp(buffer) {
-  return processImageToWebp(buffer, THUMB_MAX_WIDTH);
+  try {
+    return await sharp(buffer)
+      .rotate()
+      .resize({
+        width: THUMB_TARGET_WIDTH,
+        height: THUMB_TARGET_HEIGHT,
+        fit: 'cover',
+        position: 'centre',
+      })
+      .webp({
+        quality: WEBP_QUALITY,
+        effort: 4,
+      })
+      .toBuffer();
+  } catch {
+    throw createHttpError(400, 'Nao foi possivel processar a thumbnail enviada.');
+  }
 }
 
 async function processGalleryToWebp(buffer) {
   return processImageToWebp(buffer, GALLERY_MAX_WIDTH);
+}
+
+function normalizeHexColor(input, fallback = '#222222') {
+  const value = String(input || '').trim();
+  const shortMatch = value.match(/^#([a-fA-F0-9]{3})$/);
+  if (shortMatch) {
+    const [r, g, b] = shortMatch[1].split('');
+    return `#${r}${r}${g}${g}${b}${b}`.toLowerCase();
+  }
+  const fullMatch = value.match(/^#([a-fA-F0-9]{6})$/);
+  if (fullMatch) {
+    return `#${fullMatch[1].toLowerCase()}`;
+  }
+  return fallback;
+}
+
+async function processLogoColorThumbnailToWebp(logoBuffer, backgroundColor, paddingPercent) {
+  const safePadding = Math.max(0, Math.min(40, Number.isFinite(paddingPercent) ? paddingPercent : 15));
+  const color = normalizeHexColor(backgroundColor, '#222222');
+  const base = sharp({
+    create: {
+      width: THUMB_TARGET_WIDTH,
+      height: THUMB_TARGET_HEIGHT,
+      channels: 4,
+      background: color,
+    },
+  });
+
+  const minDimension = Math.min(THUMB_TARGET_WIDTH, THUMB_TARGET_HEIGHT);
+  const paddingPx = Math.round((minDimension * safePadding) / 100);
+  const maxLogoWidth = Math.max(1, THUMB_TARGET_WIDTH - paddingPx * 2);
+  const maxLogoHeight = Math.max(1, THUMB_TARGET_HEIGHT - paddingPx * 2);
+
+  let logoRaster;
+  try {
+    logoRaster = await sharp(logoBuffer, { density: 300 })
+      .rotate()
+      .resize({
+        width: maxLogoWidth,
+        height: maxLogoHeight,
+        fit: 'inside',
+        withoutEnlargement: true,
+      })
+      .png()
+      .toBuffer();
+  } catch {
+    throw createHttpError(400, 'Nao foi possivel processar a logo para gerar a thumbnail.');
+  }
+
+  return base
+    .composite([
+      {
+        input: logoRaster,
+        gravity: 'center',
+      },
+    ])
+    .webp({
+      quality: WEBP_QUALITY,
+      effort: 4,
+    })
+    .toBuffer();
 }
 
 async function saveNewImageFile({
@@ -588,6 +670,38 @@ function validatePayloadShape(payload) {
     errors.push('thumbnailPlan.path é obrigatório quando kind é "existing".');
   }
 
+  if (payload.thumbnailConfig !== undefined && typeof payload.thumbnailConfig !== 'object') {
+    errors.push('thumbnailConfig deve ser um objeto quando enviado.');
+  }
+
+  const thumbnailMode = payload.thumbnailConfig?.mode || 'image';
+  if (!['image', 'logoColor'].includes(thumbnailMode)) {
+    errors.push('thumbnailConfig.mode deve ser "image" ou "logoColor".');
+  }
+
+  if (thumbnailMode === 'logoColor' && payload.thumbnailPlan.kind === 'new') {
+    if (
+      payload.thumbnailConfig?.logoFileId !== undefined &&
+      typeof payload.thumbnailConfig.logoFileId !== 'string'
+    ) {
+      errors.push('thumbnailConfig.logoFileId inválido.');
+    }
+    if (
+      typeof payload.thumbnailConfig?.backgroundColor !== 'string' ||
+      !payload.thumbnailConfig.backgroundColor.trim()
+    ) {
+      errors.push('thumbnailConfig.backgroundColor é obrigatório no modo logoColor.');
+    }
+    if (
+      payload.thumbnailConfig?.paddingPercent !== undefined &&
+      (!Number.isFinite(Number(payload.thumbnailConfig.paddingPercent)) ||
+        Number(payload.thumbnailConfig.paddingPercent) < 0 ||
+        Number(payload.thumbnailConfig.paddingPercent) > 40)
+    ) {
+      errors.push('thumbnailConfig.paddingPercent deve estar entre 0 e 40.');
+    }
+  }
+
   return errors;
 }
 
@@ -645,14 +759,26 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
     }
     thumbnailPath = await ensureExistingAssetPath(payload.thumbnailPlan.path);
   } else {
-    const file = uploadedFilesMap.get(payload.thumbnailPlan.fileId);
+    const thumbnailMode = payload.thumbnailConfig?.mode || 'image';
+    const thumbnailFileId =
+      thumbnailMode === 'logoColor'
+        ? payload.thumbnailConfig?.logoFileId || payload.thumbnailPlan.fileId
+        : payload.thumbnailPlan.fileId;
+    const file = uploadedFilesMap.get(thumbnailFileId);
     if (!file) {
       throw createHttpError(
         400,
-        `Arquivo para thumbnail fileId "${payload.thumbnailPlan.fileId}" não foi enviado.`
+        `Arquivo para thumbnail fileId "${thumbnailFileId}" não foi enviado.`
       );
     }
-    const thumbBuffer = await processThumbnailToWebp(file.buffer);
+    const thumbBuffer =
+      thumbnailMode === 'logoColor'
+        ? await processLogoColorThumbnailToWebp(
+            file.buffer,
+            payload.thumbnailConfig?.backgroundColor,
+            Number(payload.thumbnailConfig?.paddingPercent ?? 15)
+          )
+        : await processThumbnailToWebp(file.buffer);
     const saved = await saveNewImageFile({
       file,
       targetRelativeDir: PROJECTS_THUMBS_DIR,
@@ -760,6 +886,41 @@ function createHttpError(status, message) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function collectProjectAssetPaths(project) {
+  const paths = [];
+  if (project?.image) {
+    paths.push(normalizeRelativeAssetPath(project.image));
+  }
+  if (Array.isArray(project?.images)) {
+    project.images.forEach((item) => {
+      if (item) paths.push(normalizeRelativeAssetPath(item));
+    });
+  }
+  return Array.from(new Set(paths.filter(Boolean)));
+}
+
+async function removeAssetFileIfExists(relativeAssetPath) {
+  const normalized = normalizeRelativeAssetPath(relativeAssetPath);
+  if (!normalized) return false;
+  const absolutePath = resolvePortfolioPath(normalized);
+  if (!(await fileExists(absolutePath))) {
+    return false;
+  }
+  await fsPromises.unlink(absolutePath);
+  return true;
+}
+
+async function removeAssetDirectoryIfExists(relativeDirPath) {
+  const normalized = normalizeRelativeAssetPath(relativeDirPath);
+  if (!normalized) return false;
+  const absolutePath = resolvePortfolioPath(normalized);
+  if (!(await fileExists(absolutePath))) {
+    return false;
+  }
+  await fsPromises.rm(absolutePath, { recursive: true, force: true });
+  return true;
 }
 
 function normalizeModelId(modelName) {
@@ -1251,6 +1412,76 @@ app.get(
   })
 );
 
+app.post(
+  '/api/projects/reorder',
+  asyncHandler(async (req, res) => {
+    const lang = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
+    const category = typeof req.body?.category === 'string' ? req.body.category : '';
+    const orderedSlugs = Array.isArray(req.body?.orderedSlugs)
+      ? req.body.orderedSlugs.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+      : [];
+
+    if (!category) {
+      throw createHttpError(400, 'Campo "category" é obrigatório para reordenar.');
+    }
+    if (orderedSlugs.length === 0) {
+      throw createHttpError(400, 'Campo "orderedSlugs" precisa conter a ordem completa.');
+    }
+
+    await withWriteLock(async () => {
+      const projectsByLocale = await readAllProjectsFiles();
+      validateCategoryExists(projectsByLocale, category);
+
+      const baseList = projectsByLocale[lang][category];
+      if (!Array.isArray(baseList) || baseList.length === 0) {
+        throw createHttpError(400, `Categoria "${category}" não possui projetos para reordenar.`);
+      }
+
+      const currentSlugs = baseList.map((project) => normalizeModalSlug(project.title));
+      if (orderedSlugs.length !== currentSlugs.length) {
+        throw createHttpError(
+          400,
+          'A ordem enviada não bate com a quantidade total de projetos da categoria.'
+        );
+      }
+
+      const seen = new Set();
+      for (const slug of orderedSlugs) {
+        if (seen.has(slug)) {
+          throw createHttpError(400, `Slug repetido no reorder: "${slug}".`);
+        }
+        seen.add(slug);
+      }
+
+      for (const slug of currentSlugs) {
+        if (!seen.has(slug)) {
+          throw createHttpError(
+            400,
+            `A ordem enviada está incompleta. Slug ausente: "${slug}".`
+          );
+        }
+      }
+
+      const oldIndexBySlug = new Map();
+      currentSlugs.forEach((slug, index) => oldIndexBySlug.set(slug, index));
+      const reorderedIndices = orderedSlugs.map((slug) => oldIndexBySlug.get(slug));
+
+      for (const locale of LOCALES) {
+        const localeList = projectsByLocale[locale][category];
+        projectsByLocale[locale][category] = reorderedIndices.map((index) => localeList[index]);
+      }
+
+      await writeAllProjectsFiles(projectsByLocale);
+    });
+
+    res.json({
+      message: `Ordem da categoria "${category}" atualizada com sucesso.`,
+      category,
+      total: orderedSlugs.length,
+    });
+  })
+);
+
 app.get(
   '/api/projects/:slug',
   asyncHandler(async (req, res) => {
@@ -1494,6 +1725,75 @@ app.put(
   })
 );
 
+app.delete(
+  '/api/projects/:slug',
+  asyncHandler(async (req, res) => {
+    const baseSlug = req.params.slug;
+    const baseLocale = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
+
+    const result = await withWriteLock(async () => {
+      const projectsByLocale = await readAllProjectsFiles();
+      const targetsByLocale = resolveEditTargetsByLocale(projectsByLocale, baseSlug, baseLocale);
+      const baseProject = targetsByLocale[baseLocale].project;
+      const assetFolder = inferAssetFolderFromProject(baseProject);
+
+      const referencedAssetPaths = new Set();
+      for (const locale of LOCALES) {
+        const project = targetsByLocale[locale].project;
+        collectProjectAssetPaths(project).forEach((assetPath) => referencedAssetPaths.add(assetPath));
+      }
+
+      for (const locale of LOCALES) {
+        const target = targetsByLocale[locale];
+        projectsByLocale[locale][target.category].splice(target.index, 1);
+      }
+
+      await writeAllProjectsFiles(projectsByLocale);
+
+      let removedFiles = 0;
+      let missingFiles = 0;
+      const removeWarnings = [];
+
+      for (const relativePath of referencedAssetPaths) {
+        try {
+          const removed = await removeAssetFileIfExists(relativePath);
+          if (removed) {
+            removedFiles += 1;
+          } else {
+            missingFiles += 1;
+          }
+        } catch (error) {
+          removeWarnings.push(`Falha ao remover arquivo "${relativePath}": ${error.message}`);
+        }
+      }
+
+      let removedFolder = false;
+      if (assetFolder && assetFolder !== 'thumbs') {
+        const galleryDir = normalizeRelativeAssetPath(path.posix.join(PROJECTS_ASSETS_DIR, assetFolder));
+        try {
+          removedFolder = await removeAssetDirectoryIfExists(galleryDir);
+        } catch (error) {
+          removeWarnings.push(`Falha ao remover pasta "${galleryDir}": ${error.message}`);
+        }
+      }
+
+      return {
+        slug: normalizeModalSlug(baseProject.title),
+        assetFolder,
+        removedFiles,
+        missingFiles,
+        removedFolder,
+        removeWarnings,
+      };
+    });
+
+    res.json({
+      message: 'Projeto deletado com sucesso.',
+      ...result,
+    });
+  })
+);
+
 app.use((error, req, res, next) => {
   const status = error.status || 500;
   const message = error.message || 'Erro interno do servidor.';
@@ -1522,7 +1822,9 @@ async function bootstrap() {
     console.log('[uploader-api] running on http://localhost:' + PORT);
     console.log('[uploader-api] portfolio root:', PORTFOLIO_ROOT);
     console.log('[uploader-api] image profile:', {
-      thumbWidth: THUMB_MAX_WIDTH,
+      thumbWidth: THUMB_TARGET_WIDTH,
+      thumbHeight: THUMB_TARGET_HEIGHT,
+      thumbAspect: THUMB_CARD_ASPECT_RATIO,
       galleryWidth: GALLERY_MAX_WIDTH,
       webpQuality: WEBP_QUALITY,
     });

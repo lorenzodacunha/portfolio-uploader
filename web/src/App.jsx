@@ -16,8 +16,151 @@ import { sanitizeRichTextHtml } from './components/richTextSanitize';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3333';
 const DEFAULT_LOCALES = ['pt', 'en', 'es'];
+const SPLIT_FRAME_WIDTH = 1920;
+const SPLIT_FRAME_HEIGHT = 1080;
+const DEFAULT_SPLIT_OVERLAP = 120;
+const THUMB_PREVIEW_WIDTH = 248;
+const THUMB_PREVIEW_HEIGHT = Math.round(THUMB_PREVIEW_WIDTH / (195 / 113));
+const DEFAULT_LOGO_PADDING_PERCENT = 15;
 
 const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const waitNextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+
+function readImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const imageUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(imageUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(imageUrl);
+      reject(new Error(`Falha ao carregar imagem "${file.name}".`));
+    };
+    image.src = imageUrl;
+  });
+}
+
+function canvasToPngFile(canvas, fileName) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('Falha ao gerar frame da imagem.'));
+        return;
+      }
+      resolve(
+        new File([blob], fileName, {
+          type: 'image/png',
+          lastModified: Date.now(),
+        })
+      );
+    }, 'image/png');
+  });
+}
+
+async function splitTallImageFile(file, overlapPx) {
+  const image = await readImageFromFile(file);
+  const shouldSplit = image.naturalHeight > SPLIT_FRAME_HEIGHT;
+  if (!shouldSplit) {
+    return {
+      didSplit: false,
+      files: [file],
+    };
+  }
+
+  const scale = SPLIT_FRAME_WIDTH / image.naturalWidth;
+  const scaledHeight = Math.max(1, Math.round(image.naturalHeight * scale));
+  if (scaledHeight <= SPLIT_FRAME_HEIGHT) {
+    return {
+      didSplit: false,
+      files: [file],
+    };
+  }
+
+  const overlap = Number.isFinite(overlapPx)
+    ? Math.max(0, Math.min(SPLIT_FRAME_HEIGHT - 1, Math.round(overlapPx)))
+    : DEFAULT_SPLIT_OVERLAP;
+  const step = Math.max(1, SPLIT_FRAME_HEIGHT - overlap);
+
+  const frameTops = [];
+  for (let top = 0; top + SPLIT_FRAME_HEIGHT < scaledHeight; top += step) {
+    frameTops.push(top);
+  }
+  const anchoredLastTop = Math.max(0, scaledHeight - SPLIT_FRAME_HEIGHT);
+  if (frameTops.length === 0 || frameTops[frameTops.length - 1] !== anchoredLastTop) {
+    frameTops.push(anchoredLastTop);
+  }
+
+  const sourceSliceHeight = SPLIT_FRAME_HEIGHT / scale;
+  const frameFiles = [];
+  const fileBaseName = file.name.replace(/\.[^/.]+$/, '');
+
+  for (let index = 0; index < frameTops.length; index += 1) {
+    const sourceY = frameTops[index] / scale;
+    const canvas = document.createElement('canvas');
+    canvas.width = SPLIT_FRAME_WIDTH;
+    canvas.height = SPLIT_FRAME_HEIGHT;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Falha ao inicializar canvas para split da imagem.');
+    }
+
+    ctx.drawImage(
+      image,
+      0,
+      sourceY,
+      image.naturalWidth,
+      sourceSliceHeight,
+      0,
+      0,
+      SPLIT_FRAME_WIDTH,
+      SPLIT_FRAME_HEIGHT
+    );
+
+    const paddedNumber = String(index + 1).padStart(3, '0');
+    const frameName = `${fileBaseName}__${paddedNumber}.png`;
+    // Mantem o app responsivo durante split de imagens muito altas.
+    await waitNextFrame();
+    const frameFile = await canvasToPngFile(canvas, frameName);
+    frameFiles.push(frameFile);
+  }
+
+  return {
+    didSplit: true,
+    files: frameFiles,
+  };
+}
+
+async function generateLogoThumbnailPreviewFile(logoFile, backgroundColor, paddingPercent) {
+  const image = await readImageFromFile(logoFile);
+  const canvas = document.createElement('canvas');
+  canvas.width = THUMB_PREVIEW_WIDTH;
+  canvas.height = THUMB_PREVIEW_HEIGHT;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Falha ao gerar preview da thumb.');
+  }
+
+  ctx.fillStyle = backgroundColor || '#1f1f1f';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const minDimension = Math.min(canvas.width, canvas.height);
+  const safePadding = Math.max(0, Math.min(40, Number(paddingPercent) || DEFAULT_LOGO_PADDING_PERCENT));
+  const paddingPx = Math.round((minDimension * safePadding) / 100);
+  const maxLogoWidth = Math.max(1, canvas.width - paddingPx * 2);
+  const maxLogoHeight = Math.max(1, canvas.height - paddingPx * 2);
+
+  const logoScale = Math.min(maxLogoWidth / image.naturalWidth, maxLogoHeight / image.naturalHeight, 1);
+  const drawWidth = Math.max(1, Math.round(image.naturalWidth * logoScale));
+  const drawHeight = Math.max(1, Math.round(image.naturalHeight * logoScale));
+  const offsetX = Math.round((canvas.width - drawWidth) / 2);
+  const offsetY = Math.round((canvas.height - drawHeight) / 2);
+
+  ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
+  return canvasToPngFile(canvas, 'thumb-logo-preview.png');
+}
 
 const emptyLocales = () => ({
   pt: { title: '', description: '' },
@@ -42,7 +185,17 @@ const emptyForm = (category = '') => ({
   assetFolder: '',
   common: emptyCommon(),
   locales: emptyLocales(),
-  thumbnail: { kind: 'none', path: '', preview: '', id: '', file: null },
+  thumbnail: {
+    mode: 'image',
+    kind: 'none',
+    path: '',
+    preview: '',
+    id: '',
+    file: null,
+    logo: { id: '', file: null, name: '' },
+    backgroundColor: '#1f1f1f',
+    paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
+  },
   gallery: [],
 });
 
@@ -56,6 +209,9 @@ function revokeObjectUrls(form) {
       URL.revokeObjectURL(item.preview);
     }
   });
+  if (form.thumbnail?.mode === 'logoColor' && form.thumbnail?.preview) {
+    URL.revokeObjectURL(form.thumbnail.preview);
+  }
 }
 
 function toAssetPreviewUrl(relativePath) {
@@ -120,10 +276,18 @@ function App() {
   const [error, setError] = useState('');
   const [form, setForm] = useState(emptyForm());
   const [draggingGalleryId, setDraggingGalleryId] = useState('');
+  const [draggingProjectSlug, setDraggingProjectSlug] = useState('');
+  const [isReorderingProjects, setIsReorderingProjects] = useState(false);
+  const [isSplittingGallery, setIsSplittingGallery] = useState(false);
+  const [splitProgressText, setSplitProgressText] = useState('');
+  const [gallerySplitOverlap, setGallerySplitOverlap] = useState(DEFAULT_SPLIT_OVERLAP);
   const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const [consoleLogs, setConsoleLogs] = useState([]);
   const [consoleStatus, setConsoleStatus] = useState('idle');
   const consoleBodyRef = useRef(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const replaceForm = (nextForm) => {
     setForm((previous) => {
@@ -169,6 +333,72 @@ function App() {
     consoleBodyRef.current.scrollTop = consoleBodyRef.current.scrollHeight;
   }, [consoleLogs, isConsoleOpen]);
 
+  useEffect(() => {
+    let canceled = false;
+
+    const syncLogoPreview = async () => {
+      if (form.thumbnail.mode !== 'logoColor' || !form.thumbnail.logo?.file) {
+        if (form.thumbnail.mode === 'logoColor') {
+          setForm((current) => {
+            if (current.thumbnail.mode !== 'logoColor' || !current.thumbnail.preview) return current;
+            if (current.thumbnail.preview.startsWith('blob:')) {
+              URL.revokeObjectURL(current.thumbnail.preview);
+            }
+            return {
+              ...current,
+              thumbnail: {
+                ...current.thumbnail,
+                preview: '',
+              },
+            };
+          });
+        }
+        return;
+      }
+
+      try {
+        const previewFile = await generateLogoThumbnailPreviewFile(
+          form.thumbnail.logo.file,
+          form.thumbnail.backgroundColor,
+          form.thumbnail.paddingPercent
+        );
+        if (canceled) return;
+        const previewUrl = URL.createObjectURL(previewFile);
+        setForm((current) => {
+          if (current.thumbnail.mode !== 'logoColor') {
+            URL.revokeObjectURL(previewUrl);
+            return current;
+          }
+          if (current.thumbnail.preview && current.thumbnail.preview.startsWith('blob:')) {
+            URL.revokeObjectURL(current.thumbnail.preview);
+          }
+          return {
+            ...current,
+            thumbnail: {
+              ...current.thumbnail,
+              preview: previewUrl,
+            },
+          };
+        });
+      } catch {
+        if (!canceled) {
+          setError('Nao foi possivel gerar o preview da thumb (Logo + Cor).');
+        }
+      }
+    };
+
+    syncLogoPreview();
+
+    return () => {
+      canceled = true;
+    };
+  }, [
+    form.thumbnail.mode,
+    form.thumbnail.logo?.file,
+    form.thumbnail.backgroundColor,
+    form.thumbnail.paddingPercent,
+  ]);
+
   const appendConsoleLog = (message, level = 'info') => {
     const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false });
     setConsoleLogs((current) => [
@@ -196,11 +426,74 @@ function App() {
     });
   }, [projects, search, categoryFilter]);
 
+  const canDragReorderProjects = useMemo(
+    () => categoryFilter !== 'all' && !search.trim() && !isLoading,
+    [categoryFilter, search, isLoading]
+  );
+
+  const reorderProjectsInCategory = (projectSlugFrom, projectSlugTo) => {
+    if (!projectSlugFrom || !projectSlugTo || projectSlugFrom === projectSlugTo) {
+      return null;
+    }
+
+    const categoryProjects = projects.filter((project) => project.category === categoryFilter);
+    const fromIndex = categoryProjects.findIndex((project) => project.slug === projectSlugFrom);
+    const toIndex = categoryProjects.findIndex((project) => project.slug === projectSlugTo);
+    if (fromIndex < 0 || toIndex < 0) return null;
+
+    const reorderedCategory = [...categoryProjects];
+    const [moved] = reorderedCategory.splice(fromIndex, 1);
+    reorderedCategory.splice(toIndex, 0, moved);
+    const reorderedSlugs = reorderedCategory.map((project) => project.slug);
+
+    const next = [];
+    let pointer = 0;
+    for (const project of projects) {
+      if (project.category !== categoryFilter) {
+        next.push(project);
+        continue;
+      }
+      next.push(reorderedCategory[pointer]);
+      pointer += 1;
+    }
+
+    setProjects(next);
+    return reorderedSlugs;
+  };
+
+  const persistProjectOrder = async (orderedSlugs) => {
+    if (!Array.isArray(orderedSlugs) || orderedSlugs.length === 0) return;
+    setIsReorderingProjects(true);
+    setError('');
+    try {
+      const response = await apiRequest('/api/projects/reorder?lang=pt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          category: categoryFilter,
+          orderedSlugs,
+        }),
+      });
+      setFeedback(response.message || 'Ordem dos projetos atualizada.');
+      await refreshProjects();
+    } catch (requestError) {
+      setError(requestError.message);
+      await refreshProjects();
+    } finally {
+      setIsReorderingProjects(false);
+    }
+  };
+
   const resetForCreate = () => {
     setMode('create');
     setSelectedSlug('');
     setError('');
     setFeedback('');
+    setIsDeleteModalOpen(false);
+    setDeleteConfirmText('');
+    setIsDeleting(false);
     const defaultCategory = meta.categories[0] || '';
     replaceForm(emptyForm(defaultCategory));
   };
@@ -226,13 +519,27 @@ function App() {
         },
         thumbnail: data.image
           ? {
+              mode: 'image',
               kind: 'existing',
               path: data.image,
               preview: toAssetPreviewUrl(data.image),
               id: '',
               file: null,
+              logo: { id: '', file: null, name: '' },
+              backgroundColor: '#1f1f1f',
+              paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
             }
-          : { kind: 'none', path: '', preview: '', id: '', file: null },
+          : {
+              mode: 'image',
+              kind: 'none',
+              path: '',
+              preview: '',
+              id: '',
+              file: null,
+              logo: { id: '', file: null, name: '' },
+              backgroundColor: '#1f1f1f',
+              paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
+            },
         gallery: (data.images || []).map((imagePath) => ({
           id: createId(),
           kind: 'existing',
@@ -320,23 +627,65 @@ function App() {
     }));
   };
 
-  const addGalleryFiles = (fileList) => {
+  const toNewGalleryItem = (file, displayName = file.name) => ({
+    id: createId(),
+    kind: 'new',
+    name: displayName,
+    file,
+    path: '',
+    preview: URL.createObjectURL(file),
+  });
+
+  const addGalleryFiles = async (fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    setForm((current) => ({
-      ...current,
-      gallery: [
-        ...current.gallery,
-        ...files.map((file) => ({
-          id: createId(),
-          kind: 'new',
-          name: file.name,
-          file,
-          path: '',
-          preview: URL.createObjectURL(file),
-        })),
-      ],
-    }));
+
+    setError('');
+    setFeedback('');
+    setIsSplittingGallery(true);
+    const overlap = Number.isFinite(Number(gallerySplitOverlap))
+      ? Number(gallerySplitOverlap)
+      : DEFAULT_SPLIT_OVERLAP;
+    const nextItems = [];
+    const splitSummaries = [];
+    const warnings = [];
+
+    try {
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setSplitProgressText(`Splitting... ${index + 1}/${files.length} (${file.name})`);
+        try {
+          const splitResult = await splitTallImageFile(file, overlap);
+          if (splitResult.didSplit) {
+            splitSummaries.push(`${file.name} -> ${splitResult.files.length} frames`);
+          }
+          splitResult.files.forEach((item) => {
+            nextItems.push(toNewGalleryItem(item, item.name));
+          });
+        } catch {
+          warnings.push(`Falha no split de "${file.name}". A imagem original foi mantida.`);
+          nextItems.push(toNewGalleryItem(file, file.name));
+          await waitNextFrame();
+        }
+      }
+    } finally {
+      setIsSplittingGallery(false);
+      setSplitProgressText('');
+    }
+
+    if (nextItems.length > 0) {
+      setForm((current) => ({
+        ...current,
+        gallery: [...current.gallery, ...nextItems],
+      }));
+    }
+
+    if (splitSummaries.length > 0) {
+      setFeedback(`Split concluido: ${splitSummaries.join(' | ')}`);
+    }
+    if (warnings.length > 0) {
+      setError(warnings.join(' '));
+    }
   };
 
   const removeGalleryImage = (imageId) => {
@@ -377,14 +726,74 @@ function App() {
       return {
         ...current,
         thumbnail: {
+          ...current.thumbnail,
+          mode: 'image',
           kind: 'new',
           id: createId(),
           file,
           path: '',
           preview: URL.createObjectURL(file),
+          logo: { id: '', file: null, name: '' },
         },
       };
     });
+  };
+
+  const toggleLogoColorThumbnailMode = (enabled) => {
+    setForm((current) => {
+      const previousPreview = current.thumbnail.preview;
+      if (previousPreview && previousPreview.startsWith('blob:')) {
+        URL.revokeObjectURL(previousPreview);
+      }
+      if (enabled) {
+        return {
+          ...current,
+          thumbnail: {
+            ...current.thumbnail,
+            mode: 'logoColor',
+            kind: 'none',
+            path: '',
+            id: '',
+            file: null,
+            preview: '',
+          },
+        };
+      }
+
+      return {
+        ...current,
+        thumbnail: {
+          ...current.thumbnail,
+          mode: 'image',
+          kind: 'none',
+          path: '',
+          id: '',
+          file: null,
+          preview: '',
+          logo: { id: '', file: null, name: '' },
+        },
+      };
+    });
+  };
+
+  const setLogoThumbnailFile = (file) => {
+    if (!file) return;
+    setForm((current) => ({
+      ...current,
+      thumbnail: {
+        ...current.thumbnail,
+        mode: 'logoColor',
+        kind: 'new',
+        id: createId(),
+        file,
+        path: '',
+        logo: {
+          id: createId(),
+          file,
+          name: file.name,
+        },
+      },
+    }));
   };
 
   const clearThumbnail = () => {
@@ -394,7 +803,15 @@ function App() {
       }
       return {
         ...current,
-        thumbnail: { kind: 'none', path: '', preview: '', id: '', file: null },
+        thumbnail: {
+          ...current.thumbnail,
+          kind: 'none',
+          path: '',
+          preview: '',
+          id: '',
+          file: null,
+          logo: { id: '', file: null, name: '' },
+        },
       };
     });
   };
@@ -588,7 +1005,23 @@ function App() {
     }
 
     if (!form.gallery.length) validationErrors.push('Adicione ao menos 1 imagem de galeria.');
-    if (form.thumbnail.kind === 'none') validationErrors.push('Selecione uma thumbnail do projeto.');
+    if (form.thumbnail.mode === 'logoColor') {
+      if (form.thumbnail.kind !== 'new' || !form.thumbnail.logo?.file) {
+        validationErrors.push('No modo Logo + Cor, envie uma logo para gerar a thumbnail.');
+      }
+      if (!/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(form.thumbnail.backgroundColor || ''))) {
+        validationErrors.push('Selecione uma cor de fundo valida para a thumbnail.');
+      }
+      if (
+        !Number.isFinite(Number(form.thumbnail.paddingPercent)) ||
+        Number(form.thumbnail.paddingPercent) < 0 ||
+        Number(form.thumbnail.paddingPercent) > 40
+      ) {
+        validationErrors.push('Padding da logo deve ficar entre 0 e 40%.');
+      }
+    } else if (form.thumbnail.kind === 'none') {
+      validationErrors.push('Selecione uma thumbnail do projeto.');
+    }
 
     if (![1, 2, 3].includes(Number(form.common.compatibility))) {
       validationErrors.push('Compatibilidade precisa ser 1, 2 ou 3.');
@@ -637,7 +1070,21 @@ function App() {
       thumbnailPlan:
         form.thumbnail.kind === 'existing'
           ? { kind: 'existing', path: form.thumbnail.path }
-          : { kind: 'new', fileId: form.thumbnail.id },
+          : {
+              kind: 'new',
+              fileId: form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.id : form.thumbnail.id,
+            },
+      thumbnailConfig:
+        form.thumbnail.mode === 'logoColor'
+          ? {
+              mode: 'logoColor',
+              logoFileId: form.thumbnail.logo.id,
+              backgroundColor: form.thumbnail.backgroundColor,
+              paddingPercent: Number(form.thumbnail.paddingPercent),
+            }
+          : {
+              mode: 'image',
+            },
     };
 
     const formData = new FormData();
@@ -649,10 +1096,16 @@ function App() {
     });
 
     if (form.thumbnail.kind === 'new') {
+      const thumbnailFile = form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.file : form.thumbnail.file;
+      const thumbnailFileId = form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.id : form.thumbnail.id;
+      if (!thumbnailFile || !thumbnailFileId) {
+        setError('Arquivo da thumbnail nao encontrado para upload.');
+        return;
+      }
       formData.append(
         'thumbnailFiles',
-        form.thumbnail.file,
-        `${form.thumbnail.id}__${form.thumbnail.file.name}`
+        thumbnailFile,
+        `${thumbnailFileId}__${thumbnailFile.name}`
       );
     }
 
@@ -675,6 +1128,41 @@ function App() {
       setError(requestError.message);
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const openDeleteModal = () => {
+    setDeleteConfirmText('');
+    setIsDeleteModalOpen(true);
+  };
+
+  const closeDeleteModal = () => {
+    if (isDeleting) return;
+    setIsDeleteModalOpen(false);
+    setDeleteConfirmText('');
+  };
+
+  const deleteProject = async () => {
+    if (!selectedSlug || mode !== 'edit') return;
+    if (deleteConfirmText !== 'Deletar') return;
+
+    setError('');
+    setFeedback('');
+    setIsDeleting(true);
+    try {
+      const result = await apiRequest(`/api/projects/${encodeURIComponent(selectedSlug)}?lang=pt`, {
+        method: 'DELETE',
+      });
+
+      setIsDeleteModalOpen(false);
+      setDeleteConfirmText('');
+      await refreshProjects();
+      resetForCreate();
+      setFeedback(result.message || 'Projeto deletado com sucesso.');
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -724,14 +1212,51 @@ function App() {
           </select>
 
           <div className="project-cards">
+            {canDragReorderProjects ? (
+              <p className="muted reorder-hint">
+                Arraste os cards para reordenar a categoria "{categoryFilter}".
+              </p>
+            ) : (
+              <p className="muted reorder-hint">
+                Para reordenar, selecione uma categoria especifica e limpe a busca.
+              </p>
+            )}
             {isLoading ? <p>Carregando...</p> : null}
             {!isLoading && !filteredProjects.length ? <p>Nenhum projeto encontrado.</p> : null}
             {filteredProjects.map((project) => (
               <button
                 key={`${project.category}-${project.slug}-${project.index}`}
                 type="button"
-                className={`project-card ${selectedSlug === project.slug ? 'active' : ''}`}
+                draggable={canDragReorderProjects && !isReorderingProjects}
+                className={`project-card ${selectedSlug === project.slug ? 'active' : ''} ${
+                  draggingProjectSlug === project.slug ? 'is-dragging' : ''
+                }`}
                 onClick={() => loadProjectForEdit(project.slug)}
+                onDragStart={(event) => {
+                  if (!canDragReorderProjects || isReorderingProjects) {
+                    event.preventDefault();
+                    return;
+                  }
+                  setDraggingProjectSlug(project.slug);
+                  event.dataTransfer.effectAllowed = 'move';
+                  event.dataTransfer.setData('text/plain', project.slug);
+                }}
+                onDragOver={(event) => {
+                  if (!canDragReorderProjects || isReorderingProjects) return;
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'move';
+                }}
+                onDrop={async (event) => {
+                  if (!canDragReorderProjects || isReorderingProjects) return;
+                  event.preventDefault();
+                  const fromSlug = event.dataTransfer.getData('text/plain') || draggingProjectSlug;
+                  const reorderedSlugs = reorderProjectsInCategory(fromSlug, project.slug);
+                  setDraggingProjectSlug('');
+                  if (reorderedSlugs) {
+                    await persistProjectOrder(reorderedSlugs);
+                  }
+                }}
+                onDragEnd={() => setDraggingProjectSlug('')}
               >
                 <img src={toAssetPreviewUrl(project.image)} alt={project.title} />
                 <div className="project-card-body">
@@ -740,9 +1265,9 @@ function App() {
                     {project.category} · {project.slug}
                   </small>
                 </div>
-                <span className="project-card-edit" aria-hidden="true">
-                  ✎
-                </span>
+                <div className="project-card-edit project-drag-indicator" aria-hidden="true">
+                  <span className="project-drag-glyph">⋮⋮</span>
+                </div>
               </button>
             ))}
           </div>
@@ -978,14 +1503,75 @@ function App() {
               </IconButton>
             </div>
 
-            <FileUploadDropzone
-              id="thumbnail-upload"
-              accept="image/*"
-              title="Arraste e solte a thumbnail"
-              browseLabel="Procurar"
-              helperText="PNG, JPG ou WEBP"
-              onFilesSelected={(files) => setNewThumbnail(files?.[0])}
-            />
+            <label className="thumb-mode-toggle">
+              <input
+                type="checkbox"
+                checked={form.thumbnail.mode === 'logoColor'}
+                onChange={(event) => toggleLogoColorThumbnailMode(event.target.checked)}
+              />
+              Usar Logo + Cor (gerar thumb automaticamente)
+            </label>
+
+            {form.thumbnail.mode === 'logoColor' ? (
+              <div className="thumb-logo-mode">
+                <FileUploadDropzone
+                  id="thumbnail-logo-upload"
+                  accept="image/*,.svg"
+                  title="Arraste e solte a logo"
+                  browseLabel="Selecionar logo"
+                  helperText="PNG, SVG ou WEBP"
+                  onFilesSelected={(files) => setLogoThumbnailFile(files?.[0])}
+                />
+
+                <div className="thumb-logo-controls">
+                  <label className="thumb-color-field">
+                    Cor de fundo
+                    <input
+                      className="thumb-color-input"
+                      type="color"
+                      value={form.thumbnail.backgroundColor}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          thumbnail: {
+                            ...current.thumbnail,
+                            backgroundColor: event.target.value,
+                          },
+                        }))
+                      }
+                    />
+                  </label>
+                  <label className="thumb-padding-field">
+                    Padding da logo (%)
+                    <input
+                      className="input thumb-padding-input"
+                      type="number"
+                      min={0}
+                      max={40}
+                      value={form.thumbnail.paddingPercent}
+                      onChange={(event) =>
+                        setForm((current) => ({
+                          ...current,
+                          thumbnail: {
+                            ...current.thumbnail,
+                            paddingPercent: Math.max(0, Math.min(40, Number(event.target.value || 0))),
+                          },
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : (
+              <FileUploadDropzone
+                id="thumbnail-upload"
+                accept="image/*"
+                title="Arraste e solte a thumbnail"
+                browseLabel="Procurar"
+                helperText="PNG, JPG ou WEBP"
+                onFilesSelected={(files) => setNewThumbnail(files?.[0])}
+              />
+            )}
 
             {form.thumbnail.preview ? (
               <img className="thumb-preview" src={form.thumbnail.preview} alt="Preview thumbnail" />
@@ -997,6 +1583,21 @@ function App() {
           <section className="block">
             <div className="block-header">
               <h3>Galeria de imagens</h3>
+              <label className="split-overlap-control">
+                Overlap (px)
+                <input
+                  className="input split-overlap-input"
+                  type="number"
+                  min={0}
+                  max={1079}
+                  value={gallerySplitOverlap}
+                  onChange={(event) =>
+                    setGallerySplitOverlap(
+                      Math.max(0, Math.min(1079, Number(event.target.value || DEFAULT_SPLIT_OVERLAP)))
+                    )
+                  }
+                />
+              </label>
             </div>
 
             <FileUploadDropzone
@@ -1005,9 +1606,11 @@ function App() {
               multiple
               title="Arraste e solte as imagens da galeria"
               browseLabel="Escolher imagens"
-              helperText="Seleção multipla habilitada"
+              helperText="Split automatico para imagens altas (>1080px)"
               onFilesSelected={addGalleryFiles}
             />
+
+            {isSplittingGallery ? <p className="split-indicator">{splitProgressText || 'Splitting...'}</p> : null}
 
             <div className="gallery-list">
               {form.gallery.map((image, index) => (
@@ -1060,12 +1663,64 @@ function App() {
           </section>
 
           <div className="submit-row">
-            <IconButton icon={faFloppyDisk} variant="primary" disabled={isSaving} onClick={saveProject}>
+            {mode === 'edit' && selectedSlug ? (
+              <IconButton icon={faTrash} variant="danger" onClick={openDeleteModal}>
+                Deletar
+              </IconButton>
+            ) : (
+              <span />
+            )}
+            <IconButton
+              icon={faFloppyDisk}
+              variant="primary"
+              disabled={isSaving || isSplittingGallery}
+              onClick={saveProject}
+            >
               {isSaving ? 'Salvando...' : mode === 'create' ? 'Criar projeto' : 'Salvar edicao'}
             </IconButton>
           </div>
         </section>
       </main>
+
+      {isDeleteModalOpen ? (
+        <div className="delete-modal-backdrop" role="presentation" onClick={closeDeleteModal}>
+          <div
+            className="delete-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirmar exclusao de projeto"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h3>Confirmar exclusao</h3>
+            <p>
+              Esta acao e irreversivel. O projeto sera removido dos JSONs (PT/EN/ES) e os assets
+              relacionados (thumb + pasta de imagens) serao apagados.
+            </p>
+            <label className="delete-confirm-field">
+              Digite exatamente <strong>Deletar</strong> para continuar:
+              <input
+                className="input"
+                value={deleteConfirmText}
+                onChange={(event) => setDeleteConfirmText(event.target.value)}
+                placeholder="Deletar"
+              />
+            </label>
+            <div className="delete-modal-actions">
+              <IconButton variant="secondary" onClick={closeDeleteModal} disabled={isDeleting}>
+                Cancelar
+              </IconButton>
+              <IconButton
+                icon={faTrash}
+                variant="danger"
+                onClick={deleteProject}
+                disabled={deleteConfirmText !== 'Deletar' || isDeleting}
+              >
+                {isDeleting ? 'Deletando...' : 'Confirmar Deletar'}
+              </IconButton>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {isConsoleOpen ? (
         <div className="llm-console-backdrop" role="presentation" onClick={() => setIsConsoleOpen(false)}>

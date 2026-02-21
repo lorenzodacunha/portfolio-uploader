@@ -3,11 +3,13 @@
 Mini app local para criar/editar projetos do portfolio com:
 - leitura e escrita dos JSON reais (`pt`, `en`, `es`)
 - upload multiplo de imagens com ordenacao por drag and drop
+- split automatico de imagens altas em frames 1920x1080 (overlap configuravel)
 - conversao/otimizacao de novos uploads para WebP (thumb + galeria)
 - validacao de campos obrigatorios e unicidade de slug
 - descricao com editor rich text (toolbar + modo HTML)
 - traducao automatica PT -> EN/ES com IA local (Ollama)
 - copia de imagens para os diretorios reais usados pelo portfolio em producao
+- exclusao segura de projeto com confirmacao forte
 
 ## 1) Configuracao
 
@@ -21,7 +23,8 @@ Variaveis principais:
 - `PROJECTS_PT_PATH`, `PROJECTS_EN_PATH`, `PROJECTS_ES_PATH`: arquivos JSON reais
 - `PROJECTS_ASSETS_DIR`: base de imagens de projetos
 - `PROJECTS_THUMBS_DIR`: pasta de thumbs
-- `THUMB_MAX_WIDTH`: largura maxima para thumbs (sem upscale)
+- `THUMB_TARGET_WIDTH`: largura final da thumb otimizada (default `248`)
+- `THUMB_CARD_ASPECT_RATIO`: proporcao do card para gerar thumb sem distorcer (default `195/113`)
 - `GALLERY_MAX_WIDTH`: largura maxima para imagens de galeria (sem upscale)
 - `WEBP_QUALITY`: qualidade WebP aplicada nos novos uploads
 - `ENABLE_INLINE_STYLE`: permite atributo `style` no HTML sanitizado da descricao
@@ -55,6 +58,7 @@ App web: `http://localhost:5173`
 ## 3) Como usar
 
 1. Abra a tela e use a coluna esquerda para buscar/filtrar projetos existentes.
+   - para reordenar cards, selecione uma categoria especifica (sem busca) e arraste os projetos.
 2. Clique em um card para editar ou em **Novo Projeto** para criar.
 3. Preencha todos os campos:
    - categoria
@@ -62,20 +66,28 @@ App web: `http://localhost:5173`
    - datas e links
    - stacks/tecnologias (`class` + `tooltip`)
    - titulo/descricao para `pt`, `en`, `es`
-4. Faca upload da thumbnail e imagens da galeria (novos arquivos sao convertidos para `.webp` no backend).
-5. Reordene as imagens da galeria por drag and drop.
-6. Clique em **Traduzir com IA** para preencher EN/ES a partir do PT.
+4. Na thumbnail, escolha o modo:
+   - **Thumb por imagem**: upload normal (pipeline otimiza para tamanho final pequeno).
+   - **Logo + Cor**: envie uma logo, escolha cor e padding; o backend gera a thumb final automaticamente no save.
+5. Faca upload das imagens da galeria.
+   - imagens altas (>1080px) sao divididas automaticamente em frames 1920x1080 no front.
+   - o split nao converte para webp; a conversao final ocorre somente ao salvar no backend.
+6. Reordene as imagens da galeria por drag and drop.
+7. Clique em **Traduzir com IA** para preencher EN/ES a partir do PT.
    - Use o botao **Console** para abrir o terminal de progresso da LLM.
-7. Edite descricao no rich text (atalhos: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
-8. Clique em **Criar projeto** ou **Salvar edicao**.
+8. Edite descricao no rich text (atalhos: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
+9. Em modo edicao, use **Deletar** para remover projeto (digite `Deletar` para confirmar).
+10. Clique em **Criar projeto** ou **Salvar edicao**.
 
 ## 4) Endpoints da API
 
 - `GET /api/meta`
 - `GET /api/projects?lang=pt`
+- `POST /api/projects/reorder?lang=pt` (persistencia da ordem dos cards por categoria)
 - `GET /api/projects/:slug?lang=pt`
 - `POST /api/projects` (multipart + `payload`)
 - `PUT /api/projects/:slug?lang=pt` (multipart + `payload`)
+- `DELETE /api/projects/:slug?lang=pt` (remove JSON + assets relacionados)
 - `POST /api/translate` (JSON, IA local via Ollama)
 - `POST /api/translate/stream` (NDJSON, progresso em tempo real da LLM)
 - `GET /api/image?path=assets/...` (preview)

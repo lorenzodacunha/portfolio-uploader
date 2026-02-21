@@ -5,7 +5,7 @@ Mini app local para criar/editar projetos do portfolio com:
 - upload multiplo de imagens com ordenacao por drag and drop
 - split automatico de imagens altas em frames 1920x1080 (overlap configuravel)
 - conversao/otimizacao de novos uploads para WebP (thumb + galeria)
-- validacao de campos obrigatorios e unicidade de slug
+- validacao de campos obrigatorios e unicidade de id
 - descricao com editor rich text (toolbar + modo HTML)
 - traducao automatica PT -> EN/ES com IA local (Ollama)
 - copia de imagens para os diretorios reais usados pelo portfolio em producao
@@ -62,7 +62,7 @@ App web: `http://localhost:5173`
 2. Clique em um card para editar ou em **Novo Projeto** para criar.
 3. Preencha todos os campos:
    - categoria
-   - `assetFolder`
+   - `id` (gerado automaticamente, somente leitura)
    - datas e links
    - stacks/tecnologias (`class` + `tooltip`)
    - titulo/descricao para `pt`, `en`, `es`
@@ -83,11 +83,11 @@ App web: `http://localhost:5173`
 
 - `GET /api/meta`
 - `GET /api/projects?lang=pt`
-- `POST /api/projects/reorder?lang=pt` (persistencia da ordem dos cards por categoria)
-- `GET /api/projects/:slug?lang=pt`
+- `POST /api/projects/reorder?lang=pt` (persistencia da ordem dos cards por categoria, via `orderedIds`)
+- `GET /api/projects/:id?lang=pt`
 - `POST /api/projects` (multipart + `payload`)
-- `PUT /api/projects/:slug?lang=pt` (multipart + `payload`)
-- `DELETE /api/projects/:slug?lang=pt` (remove JSON + assets relacionados)
+- `PUT /api/projects/:id?lang=pt` (multipart + `payload`)
+- `DELETE /api/projects/:id?lang=pt` (remove JSON + assets relacionados)
 - `POST /api/translate` (JSON, IA local via Ollama)
 - `POST /api/translate/stream` (NDJSON, progresso em tempo real da LLM)
 - `GET /api/image?path=assets/...` (preview)
@@ -98,7 +98,7 @@ App web: `http://localhost:5173`
 - ao menos 1 stack e ao menos 1 imagem de galeria
 - compatibilidade em `1|2|3`
 - progresso em `0..100`
-- slug unico por locale (derivado de `title`)
+- `id` unico e imutavel por projeto
 - categoria precisa existir nos JSONs reais
 - paths de arquivos sempre resolvidos dentro da raiz configurada do portfolio
 - sanitizacao de `description` no backend (remocao de conteudo perigoso, com whitelist)

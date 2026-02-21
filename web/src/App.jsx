@@ -24,6 +24,8 @@ const THUMB_PREVIEW_HEIGHT = Math.round(THUMB_PREVIEW_WIDTH / (195 / 113));
 const DEFAULT_LOGO_PADDING_PERCENT = 15;
 
 const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const createProjectPersistentId = () =>
+  `prj_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
 
 const waitNextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
@@ -181,8 +183,8 @@ const emptyCommon = () => ({
 });
 
 const emptyForm = (category = '') => ({
+  id: createProjectPersistentId(),
   category,
-  assetFolder: '',
   common: emptyCommon(),
   locales: emptyLocales(),
   thumbnail: {
@@ -265,7 +267,7 @@ function App() {
   });
   const [projects, setProjects] = useState([]);
   const [mode, setMode] = useState('create');
-  const [selectedSlug, setSelectedSlug] = useState('');
+  const [selectedId, setSelectedId] = useState('');
   const [activeLocale, setActiveLocale] = useState('pt');
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
@@ -276,7 +278,7 @@ function App() {
   const [error, setError] = useState('');
   const [form, setForm] = useState(emptyForm());
   const [draggingGalleryId, setDraggingGalleryId] = useState('');
-  const [draggingProjectSlug, setDraggingProjectSlug] = useState('');
+  const [draggingProjectId, setDraggingProjectId] = useState('');
   const [isReorderingProjects, setIsReorderingProjects] = useState(false);
   const [isSplittingGallery, setIsSplittingGallery] = useState(false);
   const [splitProgressText, setSplitProgressText] = useState('');
@@ -421,7 +423,8 @@ function App() {
       if (!normalizedSearch) return true;
       return (
         project.title.toLowerCase().includes(normalizedSearch) ||
-        project.slug.toLowerCase().includes(normalizedSearch)
+        (project.id || '').toLowerCase().includes(normalizedSearch) ||
+        (project.slug || '').toLowerCase().includes(normalizedSearch)
       );
     });
   }, [projects, search, categoryFilter]);
@@ -431,20 +434,20 @@ function App() {
     [categoryFilter, search, isLoading]
   );
 
-  const reorderProjectsInCategory = (projectSlugFrom, projectSlugTo) => {
-    if (!projectSlugFrom || !projectSlugTo || projectSlugFrom === projectSlugTo) {
+  const reorderProjectsInCategory = (projectIdFrom, projectIdTo) => {
+    if (!projectIdFrom || !projectIdTo || projectIdFrom === projectIdTo) {
       return null;
     }
 
     const categoryProjects = projects.filter((project) => project.category === categoryFilter);
-    const fromIndex = categoryProjects.findIndex((project) => project.slug === projectSlugFrom);
-    const toIndex = categoryProjects.findIndex((project) => project.slug === projectSlugTo);
+    const fromIndex = categoryProjects.findIndex((project) => project.id === projectIdFrom);
+    const toIndex = categoryProjects.findIndex((project) => project.id === projectIdTo);
     if (fromIndex < 0 || toIndex < 0) return null;
 
     const reorderedCategory = [...categoryProjects];
     const [moved] = reorderedCategory.splice(fromIndex, 1);
     reorderedCategory.splice(toIndex, 0, moved);
-    const reorderedSlugs = reorderedCategory.map((project) => project.slug);
+    const reorderedIds = reorderedCategory.map((project) => project.id);
 
     const next = [];
     let pointer = 0;
@@ -458,11 +461,11 @@ function App() {
     }
 
     setProjects(next);
-    return reorderedSlugs;
+    return reorderedIds;
   };
 
-  const persistProjectOrder = async (orderedSlugs) => {
-    if (!Array.isArray(orderedSlugs) || orderedSlugs.length === 0) return;
+  const persistProjectOrder = async (orderedIds) => {
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) return;
     setIsReorderingProjects(true);
     setError('');
     try {
@@ -473,7 +476,7 @@ function App() {
         },
         body: JSON.stringify({
           category: categoryFilter,
-          orderedSlugs,
+          orderedIds,
         }),
       });
       setFeedback(response.message || 'Ordem dos projetos atualizada.');
@@ -488,7 +491,7 @@ function App() {
 
   const resetForCreate = () => {
     setMode('create');
-    setSelectedSlug('');
+    setSelectedId('');
     setError('');
     setFeedback('');
     setIsDeleteModalOpen(false);
@@ -498,14 +501,14 @@ function App() {
     replaceForm(emptyForm(defaultCategory));
   };
 
-  const loadProjectForEdit = async (slug) => {
+  const loadProjectForEdit = async (projectId) => {
     setError('');
     setFeedback('');
     try {
-      const data = await apiRequest(`/api/projects/${encodeURIComponent(slug)}?lang=pt`);
+      const data = await apiRequest(`/api/projects/${encodeURIComponent(projectId)}?lang=pt`);
       const nextForm = {
+        id: data.id || projectId,
         category: data.category || '',
-        assetFolder: data.assetFolder || '',
         common: {
           ...emptyCommon(),
           ...(data.common || {}),
@@ -550,7 +553,7 @@ function App() {
         })),
       };
       setMode('edit');
-      setSelectedSlug(slug);
+      setSelectedId(data.id || projectId);
       replaceForm(nextForm);
     } catch (requestError) {
       setError(requestError.message);
@@ -972,7 +975,7 @@ function App() {
     const validationErrors = [];
 
     if (!form.category) validationErrors.push('Selecione uma categoria.');
-    if (!form.assetFolder.trim()) validationErrors.push('Preencha o identificador da pasta de imagens.');
+    if (!form.id || !String(form.id).trim()) validationErrors.push('ID do projeto nao pode ficar vazio.');
 
     const sanitizedLocales = DEFAULT_LOCALES.reduce((accumulator, locale) => {
       const title = (form.locales[locale]?.title || '').trim();
@@ -1053,8 +1056,8 @@ function App() {
     }
 
     const payload = {
+      id: form.id,
       category: form.category,
-      assetFolder: form.assetFolder.trim(),
       common: {
         ...form.common,
         compatibility: Number(form.common.compatibility),
@@ -1112,7 +1115,7 @@ function App() {
     const endpoint =
       mode === 'create'
         ? '/api/projects'
-        : `/api/projects/${encodeURIComponent(selectedSlug)}?lang=pt`;
+        : `/api/projects/${encodeURIComponent(selectedId)}?lang=pt`;
     const method = mode === 'create' ? 'POST' : 'PUT';
 
     setIsSaving(true);
@@ -1123,7 +1126,7 @@ function App() {
       });
       setFeedback(result.message || 'Projeto salvo.');
       await refreshProjects();
-      await loadProjectForEdit(result.slug);
+      await loadProjectForEdit(result.id || form.id);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -1143,14 +1146,14 @@ function App() {
   };
 
   const deleteProject = async () => {
-    if (!selectedSlug || mode !== 'edit') return;
+    if (!selectedId || mode !== 'edit') return;
     if (deleteConfirmText !== 'Deletar') return;
 
     setError('');
     setFeedback('');
     setIsDeleting(true);
     try {
-      const result = await apiRequest(`/api/projects/${encodeURIComponent(selectedSlug)}?lang=pt`, {
+      const result = await apiRequest(`/api/projects/${encodeURIComponent(selectedId)}?lang=pt`, {
         method: 'DELETE',
       });
 
@@ -1193,7 +1196,7 @@ function App() {
           <input
             className="input"
             type="search"
-            placeholder="Buscar por titulo ou slug"
+            placeholder="Buscar por titulo, id ou slug"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -1225,21 +1228,21 @@ function App() {
             {!isLoading && !filteredProjects.length ? <p>Nenhum projeto encontrado.</p> : null}
             {filteredProjects.map((project) => (
               <button
-                key={`${project.category}-${project.slug}-${project.index}`}
+                key={`${project.category}-${project.id}-${project.index}`}
                 type="button"
                 draggable={canDragReorderProjects && !isReorderingProjects}
-                className={`project-card ${selectedSlug === project.slug ? 'active' : ''} ${
-                  draggingProjectSlug === project.slug ? 'is-dragging' : ''
+                className={`project-card ${selectedId === project.id ? 'active' : ''} ${
+                  draggingProjectId === project.id ? 'is-dragging' : ''
                 }`}
-                onClick={() => loadProjectForEdit(project.slug)}
+                onClick={() => loadProjectForEdit(project.id)}
                 onDragStart={(event) => {
                   if (!canDragReorderProjects || isReorderingProjects) {
                     event.preventDefault();
                     return;
                   }
-                  setDraggingProjectSlug(project.slug);
+                  setDraggingProjectId(project.id);
                   event.dataTransfer.effectAllowed = 'move';
-                  event.dataTransfer.setData('text/plain', project.slug);
+                  event.dataTransfer.setData('text/plain', project.id);
                 }}
                 onDragOver={(event) => {
                   if (!canDragReorderProjects || isReorderingProjects) return;
@@ -1249,24 +1252,31 @@ function App() {
                 onDrop={async (event) => {
                   if (!canDragReorderProjects || isReorderingProjects) return;
                   event.preventDefault();
-                  const fromSlug = event.dataTransfer.getData('text/plain') || draggingProjectSlug;
-                  const reorderedSlugs = reorderProjectsInCategory(fromSlug, project.slug);
-                  setDraggingProjectSlug('');
-                  if (reorderedSlugs) {
-                    await persistProjectOrder(reorderedSlugs);
+                  const fromId = event.dataTransfer.getData('text/plain') || draggingProjectId;
+                  const reorderedIds = reorderProjectsInCategory(fromId, project.id);
+                  setDraggingProjectId('');
+                  if (reorderedIds) {
+                    await persistProjectOrder(reorderedIds);
                   }
                 }}
-                onDragEnd={() => setDraggingProjectSlug('')}
+                onDragEnd={() => setDraggingProjectId('')}
               >
                 <img src={toAssetPreviewUrl(project.image)} alt={project.title} />
                 <div className="project-card-body">
                   <strong>{project.title}</strong>
                   <small>
-                    {project.category} · {project.slug}
+                    {project.category} 
                   </small>
                 </div>
                 <div className="project-card-edit project-drag-indicator" aria-hidden="true">
-                  <span className="project-drag-glyph">⋮⋮</span>
+                  <span className="project-drag-glyph">
+                    <IconButton
+                      icon={faGripVertical}
+                      iconOnly
+                      ariaLabel={`Arrastar imagem ${project.id}`}
+                      className="drag-handle-btn"
+                    /> 
+                    </span>
                 </div>
               </button>
             ))}
@@ -1275,7 +1285,7 @@ function App() {
 
         <section className="editor-panel">
           <div className="panel-header">
-            <h2>{mode === 'create' ? 'Criar projeto' : `Editar: ${selectedSlug}`}</h2>
+            <h2>{mode === 'create' ? 'Criar projeto' : `Editar: ${selectedId}`}</h2>
           </div>
 
           <div className="form-grid">
@@ -1299,19 +1309,9 @@ function App() {
                 ))}
               </select>
             </label>
-
             <label>
-              Pasta de imagens
-              <input
-                className="input"
-                value={form.assetFolder}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    assetFolder: event.target.value,
-                  }))
-                }
-              />
+              ID (imutavel)
+              <input className="input" value={form.id || ''} readOnly />
             </label>
 
             <label>
@@ -1663,7 +1663,7 @@ function App() {
           </section>
 
           <div className="submit-row">
-            {mode === 'edit' && selectedSlug ? (
+            {mode === 'edit' && selectedId ? (
               <IconButton icon={faTrash} variant="danger" onClick={openDeleteModal}>
                 Deletar
               </IconButton>

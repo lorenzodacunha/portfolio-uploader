@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs/promises');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -40,11 +41,12 @@ const PROJECTS_FILE_BY_LOCALE = {
 };
 
 const PROJECTS_ASSETS_DIR = (process.env.PROJECTS_ASSETS_DIR || 'assets/images/projects').replace(/\\/g, '/');
-const PROJECTS_THUMBS_DIR = (process.env.PROJECTS_THUMBS_DIR || 'assets/images/projects/thumbs').replace(/\\/g, '/');
+const PROJECTS_THUMBS_DIR = (process.env.PROJECTS_THUMBS_DIR || 'assets/images/thumbs').replace(/\\/g, '/');
 const ICONS_FILE_PATH = process.env.ICONS_FILE_PATH || 'js/icons.js';
 const ENABLE_INLINE_STYLE = String(process.env.ENABLE_INLINE_STYLE || 'false').toLowerCase() === 'true';
 
 const PROJECT_FIELD_ORDER = [
+  'id',
   'title',
   'description',
   'image',
@@ -134,6 +136,19 @@ function normalizeAssetToken(value, fallback = 'projeto') {
     trim: true,
   });
   return normalized || fallback;
+}
+
+function createProjectId() {
+  return `prj_${crypto.randomUUID().replace(/-/g, '')}`;
+}
+
+function normalizeProjectId(value) {
+  const id = String(value || '').trim();
+  if (!id) return '';
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw createHttpError(400, 'ID de projeto invalido. Use apenas letras, numeros, "_" e "-".');
+  }
+  return id;
 }
 
 function parseTaggedFilename(filename) {
@@ -247,10 +262,11 @@ function orderProjectFields(project) {
   return ordered;
 }
 
-function buildProjectObject(existingProject, localeInput, commonInput, thumbnailPath, galleryPaths) {
+function buildProjectObject(existingProject, projectId, localeInput, commonInput, thumbnailPath, galleryPaths) {
   const base = existingProject ? { ...existingProject } : {};
   const merged = {
     ...base,
+    id: normalizeProjectId(projectId || base.id || createProjectId()),
     title: localeInput.title.trim(),
     description: sanitizeProjectDescription(localeInput.description),
     image: thumbnailPath,
@@ -284,6 +300,21 @@ function getProjectSlugSummary(localeProjects) {
     });
   }
   return summary;
+}
+
+function findProjectById(localeProjects, projectId) {
+  const normalizedId = normalizeProjectId(projectId);
+  for (const [category, list] of Object.entries(localeProjects)) {
+    const index = list.findIndex((project) => normalizeProjectId(project.id || '') === normalizedId);
+    if (index >= 0) {
+      return {
+        category,
+        index,
+        project: list[index],
+      };
+    }
+  }
+  return null;
 }
 
 function findProjectBySlug(localeProjects, slug) {
@@ -497,6 +528,7 @@ async function saveNewImageFile({
   baseName,
   useNumericSequence,
   numericStart = 1,
+  numericPad = 1,
   processedBuffer,
 }) {
   const absoluteDir = resolvePortfolioPath(targetRelativeDir);
@@ -509,7 +541,8 @@ async function saveNewImageFile({
 
   if (useNumericSequence) {
     while (true) {
-      candidateName = `${baseName}${index}${file.extension}`;
+      const numericToken = String(index).padStart(Math.max(1, Number(numericPad) || 1), '0');
+      candidateName = `${baseName}${numericToken}${file.extension}`;
       candidateRelativePath = normalizeRelativeAssetPath(path.posix.join(targetRelativeDir, candidateName));
       candidateAbsolutePath = resolvePortfolioPath(candidateRelativePath);
       if (!(await fileExists(candidateAbsolutePath))) {
@@ -552,8 +585,8 @@ function validatePayloadShape(payload) {
     errors.push('Campo "category" é obrigatório.');
   }
 
-  if (!payload.assetFolder || typeof payload.assetFolder !== 'string') {
-    errors.push('Campo "assetFolder" é obrigatório.');
+  if (!payload.id || typeof payload.id !== 'string') {
+    errors.push('Campo "id" e obrigatorio.');
   }
 
   if (!payload.common || typeof payload.common !== 'object') {
@@ -574,6 +607,12 @@ function validatePayloadShape(payload) {
 
   if (errors.length > 0) {
     return errors;
+  }
+
+  try {
+    normalizeProjectId(payload.id);
+  } catch (error) {
+    errors.push(error.message);
   }
 
   const common = payload.common;
@@ -716,12 +755,8 @@ async function ensureExistingAssetPath(relativeAssetPath) {
 }
 
 async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingReferences) {
-  const assetFolder = normalizeAssetToken(payload.assetFolder, 'projeto');
-  if (assetFolder === 'thumbs') {
-    throw createHttpError(400, 'assetFolder "thumbs" não é permitido.');
-  }
-
-  const galleryTargetDir = normalizeRelativeAssetPath(path.posix.join(PROJECTS_ASSETS_DIR, assetFolder));
+  const projectId = normalizeProjectId(payload.id);
+  const galleryTargetDir = normalizeRelativeAssetPath(path.posix.join(PROJECTS_ASSETS_DIR, projectId));
   const galleryPaths = [];
   let nextNumericName = 1;
 
@@ -743,9 +778,10 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
     const saved = await saveNewImageFile({
       file,
       targetRelativeDir: galleryTargetDir,
-      baseName: assetFolder,
+      baseName: `${projectId}__`,
       useNumericSequence: true,
       numericStart: nextNumericName,
+      numericPad: 3,
       processedBuffer: galleryBuffer,
     });
     nextNumericName = saved.nextIndex;
@@ -782,7 +818,7 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
     const saved = await saveNewImageFile({
       file,
       targetRelativeDir: PROJECTS_THUMBS_DIR,
-      baseName: assetFolder,
+      baseName: projectId,
       useNumericSequence: false,
       processedBuffer: thumbBuffer,
     });
@@ -792,7 +828,7 @@ async function materializeMediaPlan(payload, uploadedFilesMap, allowExistingRefe
   return {
     galleryPaths,
     thumbnailPath,
-    assetFolder,
+    assetFolder: projectId,
   };
 }
 
@@ -819,6 +855,15 @@ function assertUniqueSlugForCreate(projectsByLocale, payload) {
   }
 }
 
+function assertUniqueIdForCreate(projectsByLocale, projectId) {
+  for (const locale of LOCALES) {
+    const found = findProjectById(projectsByLocale[locale], projectId);
+    if (found) {
+      throw createHttpError(409, `ID duplicado no locale "${locale}": "${projectId}".`);
+    }
+  }
+}
+
 function assertUniqueSlugForEdit(projectsByLocale, payload, targetsByLocale) {
   for (const locale of LOCALES) {
     const newSlug = normalizeModalSlug(payload.locales[locale].title);
@@ -840,14 +885,14 @@ function assertUniqueSlugForEdit(projectsByLocale, payload, targetsByLocale) {
 }
 
 function resolveEditTargetsByLocale(projectsByLocale, baseSlug, baseLocale) {
-  const baseReference = findProjectBySlug(projectsByLocale[baseLocale], baseSlug);
+  const baseReference = findProjectById(projectsByLocale[baseLocale], baseSlug);
   if (!baseReference) {
     throw createHttpError(404, `Projeto "${baseSlug}" não foi encontrado no locale "${baseLocale}".`);
   }
 
   const targets = {};
   for (const locale of LOCALES) {
-    const direct = findProjectBySlug(projectsByLocale[locale], baseSlug);
+    const direct = findProjectById(projectsByLocale[locale], baseSlug);
     if (direct) {
       targets[locale] = direct;
       continue;
@@ -871,6 +916,9 @@ function resolveEditTargetsByLocale(projectsByLocale, baseSlug, baseLocale) {
 }
 
 function inferAssetFolderFromProject(project) {
+  if (project?.id) {
+    return normalizeProjectId(project.id);
+  }
   const allImages = [project.image, ...(Array.isArray(project.images) ? project.images : [])].filter(Boolean);
   for (const imagePath of allImages) {
     const segments = normalizeRelativeAssetPath(imagePath).split('/');
@@ -1378,6 +1426,7 @@ app.get(
     for (const [category, list] of Object.entries(localeProjects)) {
       list.forEach((project, index) => {
         projects.push({
+          id: normalizeProjectId(project.id || ''),
           slug: normalizeModalSlug(project.title),
           category,
           index,
@@ -1399,6 +1448,7 @@ app.get(
       if (!search) return true;
       return (
         project.title.toLowerCase().includes(search) ||
+        project.id.toLowerCase().includes(search) ||
         project.slug.includes(search) ||
         project.category.toLowerCase().includes(search)
       );
@@ -1417,15 +1467,15 @@ app.post(
   asyncHandler(async (req, res) => {
     const lang = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
     const category = typeof req.body?.category === 'string' ? req.body.category : '';
-    const orderedSlugs = Array.isArray(req.body?.orderedSlugs)
-      ? req.body.orderedSlugs.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean)
+    const orderedIds = Array.isArray(req.body?.orderedIds)
+      ? req.body.orderedIds.map((item) => normalizeProjectId(item)).filter(Boolean)
       : [];
 
     if (!category) {
-      throw createHttpError(400, 'Campo "category" é obrigatório para reordenar.');
+      throw createHttpError(400, 'Campo "category" e obrigatorio para reordenar.');
     }
-    if (orderedSlugs.length === 0) {
-      throw createHttpError(400, 'Campo "orderedSlugs" precisa conter a ordem completa.');
+    if (orderedIds.length === 0) {
+      throw createHttpError(400, 'Campo "orderedIds" precisa conter a ordem completa.');
     }
 
     await withWriteLock(async () => {
@@ -1434,37 +1484,34 @@ app.post(
 
       const baseList = projectsByLocale[lang][category];
       if (!Array.isArray(baseList) || baseList.length === 0) {
-        throw createHttpError(400, `Categoria "${category}" não possui projetos para reordenar.`);
+        throw createHttpError(400, `Categoria "${category}" nao possui projetos para reordenar.`);
       }
 
-      const currentSlugs = baseList.map((project) => normalizeModalSlug(project.title));
-      if (orderedSlugs.length !== currentSlugs.length) {
+      const currentIds = baseList.map((project) => normalizeProjectId(project.id || ''));
+      if (orderedIds.length !== currentIds.length) {
         throw createHttpError(
           400,
-          'A ordem enviada não bate com a quantidade total de projetos da categoria.'
+          'A ordem enviada nao bate com a quantidade total de projetos da categoria.'
         );
       }
 
       const seen = new Set();
-      for (const slug of orderedSlugs) {
-        if (seen.has(slug)) {
-          throw createHttpError(400, `Slug repetido no reorder: "${slug}".`);
+      for (const id of orderedIds) {
+        if (seen.has(id)) {
+          throw createHttpError(400, `ID repetido no reorder: "${id}".`);
         }
-        seen.add(slug);
+        seen.add(id);
       }
 
-      for (const slug of currentSlugs) {
-        if (!seen.has(slug)) {
-          throw createHttpError(
-            400,
-            `A ordem enviada está incompleta. Slug ausente: "${slug}".`
-          );
+      for (const id of currentIds) {
+        if (!seen.has(id)) {
+          throw createHttpError(400, `A ordem enviada esta incompleta. ID ausente: "${id}".`);
         }
       }
 
-      const oldIndexBySlug = new Map();
-      currentSlugs.forEach((slug, index) => oldIndexBySlug.set(slug, index));
-      const reorderedIndices = orderedSlugs.map((slug) => oldIndexBySlug.get(slug));
+      const oldIndexById = new Map();
+      currentIds.forEach((id, index) => oldIndexById.set(id, index));
+      const reorderedIndices = orderedIds.map((id) => oldIndexById.get(id));
 
       for (const locale of LOCALES) {
         const localeList = projectsByLocale[locale][category];
@@ -1477,19 +1524,19 @@ app.post(
     res.json({
       message: `Ordem da categoria "${category}" atualizada com sucesso.`,
       category,
-      total: orderedSlugs.length,
+      total: orderedIds.length,
     });
   })
 );
 
 app.get(
-  '/api/projects/:slug',
+  '/api/projects/:id',
   asyncHandler(async (req, res) => {
     const baseLocale = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
-    const targetSlug = req.params.slug;
+    const targetId = normalizeProjectId(req.params.id);
 
     const projectsByLocale = await readAllProjectsFiles();
-    const targetsByLocale = resolveEditTargetsByLocale(projectsByLocale, targetSlug, baseLocale);
+    const targetsByLocale = resolveEditTargetsByLocale(projectsByLocale, targetId, baseLocale);
     const baseTarget = targetsByLocale[baseLocale];
 
     const localesPayload = {};
@@ -1502,6 +1549,7 @@ app.get(
 
     const baseProject = baseTarget.project;
     res.json({
+      id: normalizeProjectId(baseProject.id || targetId),
       slug: normalizeModalSlug(baseProject.title),
       category: baseTarget.category,
       index: baseTarget.index,
@@ -1513,7 +1561,6 @@ app.get(
     });
   })
 );
-
 app.get(
   '/api/image',
   asyncHandler(async (req, res) => {
@@ -1617,6 +1664,9 @@ app.post(
     const result = await withWriteLock(async () => {
       const projectsByLocale = await readAllProjectsFiles();
       validateCategoryExists(projectsByLocale, payload.category);
+      const projectId = normalizeProjectId(payload.id || createProjectId());
+      payload.id = projectId;
+      assertUniqueIdForCreate(projectsByLocale, projectId);
       assertUniqueSlugForCreate(projectsByLocale, payload);
 
       const mediaResult = await materializeMediaPlan(payload, uploadedFilesMap, false);
@@ -1624,6 +1674,7 @@ app.post(
       for (const locale of LOCALES) {
         const project = buildProjectObject(
           null,
+          projectId,
           payload.locales[locale],
           {
             ...payload.common,
@@ -1638,6 +1689,7 @@ app.post(
       await writeAllProjectsFiles(projectsByLocale);
 
       return {
+        id: projectId,
         slug: normalizeModalSlug(payload.locales.pt.title),
         category: payload.category,
         assetFolder: mediaResult.assetFolder,
@@ -1652,7 +1704,7 @@ app.post(
 );
 
 app.put(
-  '/api/projects/:slug',
+  '/api/projects/:id',
   upload.fields([
     { name: 'galleryFiles', maxCount: MAX_UPLOAD_FILES },
     { name: 'thumbnailFiles', maxCount: 3 },
@@ -1665,8 +1717,12 @@ app.put(
     }
 
     const uploadedFilesMap = collectUploadedFilesMap(req.files);
-    const baseSlug = req.params.slug;
+    const baseSlug = normalizeProjectId(req.params.id);
     const baseLocale = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
+    if (payload.id && normalizeProjectId(payload.id) !== baseSlug) {
+      throw createHttpError(400, 'O ID enviado no payload nao corresponde ao ID da rota.');
+    }
+    payload.id = baseSlug;
 
     const result = await withWriteLock(async () => {
       const projectsByLocale = await readAllProjectsFiles();
@@ -1685,6 +1741,7 @@ app.put(
           projectsByLocale[locale][category].splice(index, 1);
           const updated = buildProjectObject(
             target.project,
+            baseSlug,
             payload.locales[locale],
             {
               ...payload.common,
@@ -1697,6 +1754,7 @@ app.put(
         } else {
           const updated = buildProjectObject(
             target.project,
+            baseSlug,
             payload.locales[locale],
             {
               ...payload.common,
@@ -1712,6 +1770,7 @@ app.put(
       await writeAllProjectsFiles(projectsByLocale);
 
       return {
+        id: baseSlug,
         slug: normalizeModalSlug(payload.locales.pt.title),
         category: payload.category,
         assetFolder: mediaResult.assetFolder,
@@ -1726,9 +1785,9 @@ app.put(
 );
 
 app.delete(
-  '/api/projects/:slug',
+  '/api/projects/:id',
   asyncHandler(async (req, res) => {
-    const baseSlug = req.params.slug;
+    const baseSlug = normalizeProjectId(req.params.id);
     const baseLocale = LOCALES.includes(req.query.lang) ? req.query.lang : 'pt';
 
     const result = await withWriteLock(async () => {
@@ -1778,6 +1837,7 @@ app.delete(
       }
 
       return {
+        id: normalizeProjectId(baseProject.id || baseSlug),
         slug: normalizeModalSlug(baseProject.title),
         assetFolder,
         removedFiles,

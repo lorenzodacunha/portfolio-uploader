@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import Underline from '@tiptap/extension-underline';
-import Link from '@tiptap/extension-link';
 import { TextStyle } from '@tiptap/extension-text-style';
 import Color from '@tiptap/extension-color';
 import TextAlign from '@tiptap/extension-text-align';
 import Image from '@tiptap/extension-image';
 import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
 import Youtube from '@tiptap/extension-youtube';
-import HardBreak from '@tiptap/extension-hard-break';
 import { Node } from '@tiptap/core';
 import {
   faAlignCenter,
@@ -93,21 +90,6 @@ function RichTextEditor({ value, onChange }) {
     () => [
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
-        link: false,
-        underline: false,
-        hardBreak: false,
-      }),
-      Underline.extend({
-        addKeyboardShortcuts() {
-          return {
-            'Mod-u': () => this.editor.commands.toggleUnderline(),
-          };
-        },
-      }),
-      Link.configure({
-        openOnClick: false,
-        autolink: true,
-        defaultProtocol: 'https',
       }),
       TextStyle,
       Color,
@@ -122,7 +104,6 @@ function RichTextEditor({ value, onChange }) {
         nocookie: false,
       }),
       Iframe,
-      HardBreak,
     ],
     []
   );
@@ -158,7 +139,9 @@ function RichTextEditor({ value, onChange }) {
     onUpdate({ editor: nextEditor }) {
       const html = sanitizeRichTextHtml(nextEditor.getHTML());
       lastEditorHtmlRef.current = html;
-      onChange(html);
+      if (html !== sanitizeRichTextHtml(value || '')) {
+        onChange(html);
+      }
       if (!sourceMode) {
         setSourceHtml(html);
       }
@@ -168,7 +151,8 @@ function RichTextEditor({ value, onChange }) {
   useEffect(() => {
     if (!editor) return;
     const incoming = sanitizeRichTextHtml(value || '');
-    if (incoming !== lastEditorHtmlRef.current) {
+    const current = sanitizeRichTextHtml(editor.getHTML());
+    if (incoming !== current && !editor.isFocused) {
       editor.commands.setContent(incoming, false);
       lastEditorHtmlRef.current = incoming;
     }

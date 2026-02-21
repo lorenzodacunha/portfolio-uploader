@@ -2,10 +2,11 @@
 
 Mini app local para criar/editar projetos do portfolio com:
 - leitura e escrita dos JSON reais (`pt`, `en`, `es`)
-- upload multiplo de imagens com ordenacao
+- upload multiplo de imagens com ordenacao por drag and drop
 - conversao/otimizacao de novos uploads para WebP (thumb + galeria)
 - validacao de campos obrigatorios e unicidade de slug
 - descricao com editor rich text (toolbar + modo HTML)
+- traducao automatica PT -> EN/ES com IA local (Ollama)
 - copia de imagens para os diretorios reais usados pelo portfolio em producao
 
 ## 1) Configuracao
@@ -24,6 +25,9 @@ Variaveis principais:
 - `GALLERY_MAX_WIDTH`: largura maxima para imagens de galeria (sem upscale)
 - `WEBP_QUALITY`: qualidade WebP aplicada nos novos uploads
 - `ENABLE_INLINE_STYLE`: permite atributo `style` no HTML sanitizado da descricao
+- `OLLAMA_URL`: endpoint local do Ollama (ex.: `http://localhost:11434`)
+- `OLLAMA_MODEL`: modelo preferencial para traducao (fallback automatico para modelo instalado)
+- `OLLAMA_TIMEOUT_MS`: timeout de chamada ao Ollama
 
 ### Web (Vite + React)
 Opcionalmente crie `web/.env`:
@@ -58,10 +62,12 @@ App web: `http://localhost:5173`
    - datas e links
    - stacks/tecnologias (`class` + `tooltip`)
    - titulo/descricao para `pt`, `en`, `es`
-4. Faça upload da thumbnail e imagens da galeria (novos arquivos sao convertidos para `.webp` no backend).
-5. Reordene as imagens da galeria com as setas.
-6. Edite descricao no rich text (atalhos comuns: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
-7. Clique em **Criar projeto** ou **Salvar edicao**.
+4. Faca upload da thumbnail e imagens da galeria (novos arquivos sao convertidos para `.webp` no backend).
+5. Reordene as imagens da galeria por drag and drop.
+6. Clique em **Traduzir com IA** para preencher EN/ES a partir do PT.
+   - Use o botao **Console** para abrir o terminal de progresso da LLM.
+7. Edite descricao no rich text (atalhos: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
+8. Clique em **Criar projeto** ou **Salvar edicao**.
 
 ## 4) Endpoints da API
 
@@ -70,6 +76,8 @@ App web: `http://localhost:5173`
 - `GET /api/projects/:slug?lang=pt`
 - `POST /api/projects` (multipart + `payload`)
 - `PUT /api/projects/:slug?lang=pt` (multipart + `payload`)
+- `POST /api/translate` (JSON, IA local via Ollama)
+- `POST /api/translate/stream` (NDJSON, progresso em tempo real da LLM)
 - `GET /api/image?path=assets/...` (preview)
 
 ## 5) Regras de validacao implementadas
@@ -82,3 +90,13 @@ App web: `http://localhost:5173`
 - categoria precisa existir nos JSONs reais
 - paths de arquivos sempre resolvidos dentro da raiz configurada do portfolio
 - sanitizacao de `description` no backend (remocao de conteudo perigoso, com whitelist)
+
+## 6) Traducao com IA local (Ollama)
+
+1. Instale e rode o Ollama localmente.
+2. Garanta que existe ao menos 1 modelo instalado (`ollama pull <modelo>`).
+3. Configure `OLLAMA_URL` e `OLLAMA_MODEL` no `server/.env`.
+4. Para `llama3.1:70b`, recomenda-se aumentar `OLLAMA_TIMEOUT_MS` (ex.: `300000` ou mais).
+5. No uploader, preencha PT e clique em **Traduzir com IA**.
+6. Abra o **Console** para acompanhar o andamento da geracao e validacao.
+7. EN/ES sao preenchidos automaticamente e continuam editaveis para ajuste.

@@ -18,6 +18,10 @@ const MAX_UPLOAD_FILES = Number(process.env.MAX_UPLOAD_FILES || 40);
 const THUMB_MAX_WIDTH = Number(process.env.THUMB_MAX_WIDTH || 800);
 const GALLERY_MAX_WIDTH = Number(process.env.GALLERY_MAX_WIDTH || 2000);
 const WEBP_QUALITY = Number(process.env.WEBP_QUALITY || 82);
+const OLLAMA_URL = String(process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '');
+const OLLAMA_MODEL = String(process.env.OLLAMA_MODEL || 'llama3.1:70b').trim();
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 300000);
+const OLLAMA_MAX_RETRIES = 2;
 
 const PORTFOLIO_ROOT = path.resolve(
   process.env.PORTFOLIO_ROOT || path.resolve(__dirname, '..', '..', 'Portfolio Produção')
@@ -52,6 +56,10 @@ const PROJECT_FIELD_ORDER = [
 ];
 
 let writeQueue = Promise.resolve();
+let ollamaModelsCache = {
+  loadedAt: 0,
+  models: [],
+};
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -754,6 +762,420 @@ function createHttpError(status, message) {
   return error;
 }
 
+function normalizeModelId(modelName) {
+  return String(modelName || '').trim().toLowerCase().replace(/:latest$/, '');
+}
+
+function getHtmlTagTokens(html) {
+  const tokens = [];
+  const regex = /<\/?([a-z0-9]+)\b[^>]*>/gi;
+  let match = regex.exec(String(html || ''));
+  while (match) {
+    const fullTag = match[0];
+    const name = String(match[1] || '').toLowerCase();
+    tokens.push(fullTag.startsWith('</') ? `/${name}` : name);
+    match = regex.exec(String(html || ''));
+  }
+  return tokens;
+}
+
+function getHtmlUrls(html) {
+  const urls = [];
+  const regex = /\b(?:href|src)\s*=\s*["']([^"']+)["']/gi;
+  let match = regex.exec(String(html || ''));
+  while (match) {
+    urls.push(match[1]);
+    match = regex.exec(String(html || ''));
+  }
+  return urls;
+}
+
+function assertHtmlStructurePreserved(sourceHtml, translatedHtml, targetLang) {
+  const sourceTokens = getHtmlTagTokens(sourceHtml);
+  const translatedTokens = getHtmlTagTokens(translatedHtml);
+  if (sourceTokens.join('|') !== translatedTokens.join('|')) {
+    throw new Error(`Estrutura HTML alterada no locale "${targetLang}".`);
+  }
+
+  const sourceUrls = getHtmlUrls(sourceHtml);
+  const translatedUrls = getHtmlUrls(translatedHtml);
+  if (sourceUrls.length !== translatedUrls.length) {
+    throw new Error(`Quantidade de URLs alterada no locale "${targetLang}".`);
+  }
+  for (let index = 0; index < sourceUrls.length; index += 1) {
+    if (sourceUrls[index] !== translatedUrls[index]) {
+      throw new Error(`URL alterada no locale "${targetLang}" na posicao ${index + 1}.`);
+    }
+  }
+}
+
+function normalizeTranslateRequest(payload) {
+  if (!payload || typeof payload !== 'object') {
+    throw createHttpError(400, 'Payload invalido para traducao.');
+  }
+
+  const sourceLang = String(payload.sourceLang || '').trim().toLowerCase();
+  if (sourceLang !== 'pt') {
+    throw createHttpError(400, 'sourceLang deve ser "pt".');
+  }
+
+  const targets = Array.isArray(payload.targets)
+    ? payload.targets
+        .map((item) => String(item || '').trim().toLowerCase())
+        .filter((item) => LOCALES.includes(item) && item !== sourceLang)
+    : [];
+
+  if (!targets.length) {
+    throw createHttpError(400, 'Informe ao menos um locale de destino em "targets".');
+  }
+
+  const uniqueTargets = Array.from(new Set(targets));
+
+  const content = payload.content;
+  if (!content || typeof content !== 'object') {
+    throw createHttpError(400, 'Campo "content" e obrigatorio.');
+  }
+
+  const title = typeof content.title === 'string' ? content.title.trim() : '';
+  const descriptionHtml = typeof content.descriptionHtml === 'string' ? content.descriptionHtml : '';
+  const iconsTooltips = Array.isArray(content.iconsTooltips)
+    ? content.iconsTooltips.map((item) => String(item || ''))
+    : [];
+
+  if (!title && !descriptionHtml.trim() && iconsTooltips.length === 0) {
+    throw createHttpError(400, 'Nada para traduzir. Preencha title, descriptionHtml ou iconsTooltips.');
+  }
+
+  return {
+    sourceLang,
+    targets: uniqueTargets,
+    content: {
+      title,
+      descriptionHtml,
+      iconsTooltips,
+    },
+  };
+}
+
+async function ollamaRequest(pathname, options = {}) {
+  if (typeof fetch !== 'function') {
+    throw createHttpError(500, 'Seu Node.js nao possui suporte a fetch nativo.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+  const method = String(options.method || 'POST').toUpperCase();
+  const body = options.body;
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}${pathname}`, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: method === 'GET' ? undefined : JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const ollamaMessage = payload.error || payload.message || `HTTP ${response.status}`;
+      if (String(ollamaMessage).toLowerCase().includes('model')) {
+        throw createHttpError(
+          404,
+          `Modelo do Ollama indisponivel: ${ollamaMessage}. Ajuste OLLAMA_MODEL no .env.`
+        );
+      }
+      throw createHttpError(502, `Falha no Ollama: ${ollamaMessage}`);
+    }
+    return payload;
+  } catch (error) {
+    if (error?.status) throw error;
+    if (error?.name === 'AbortError') {
+      throw createHttpError(504, `Timeout ao chamar Ollama (${OLLAMA_TIMEOUT_MS}ms).`);
+    }
+    throw createHttpError(503, 'Ollama nao esta acessivel. Verifique se esta rodando localmente.');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function ollamaGenerateRawResponse({ model, prompt, onTokenProgress }) {
+  if (typeof fetch !== 'function') {
+    throw createHttpError(500, 'Seu Node.js nao possui suporte a fetch nativo.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: true,
+        format: 'json',
+        options: {
+          temperature: 0.1,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const ollamaMessage = payload.error || payload.message || `HTTP ${response.status}`;
+      if (String(ollamaMessage).toLowerCase().includes('model')) {
+        throw createHttpError(
+          404,
+          `Modelo do Ollama indisponivel: ${ollamaMessage}. Ajuste OLLAMA_MODEL no .env.`
+        );
+      }
+      throw createHttpError(502, `Falha no Ollama: ${ollamaMessage}`);
+    }
+
+    if (!response.body) {
+      throw createHttpError(502, 'Ollama respondeu sem stream de dados.');
+    }
+
+    const decoder = new TextDecoder('utf-8');
+    let chunkBuffer = '';
+    let rawResponse = '';
+    let tokenCounter = 0;
+    let lastProgressAt = Date.now();
+
+    // `response.body` e AsyncIterable no Node moderno (fetch nativo).
+    for await (const chunk of response.body) {
+      chunkBuffer += decoder.decode(chunk, { stream: true });
+      let lineBreakIndex = chunkBuffer.indexOf('\n');
+
+      while (lineBreakIndex >= 0) {
+        const line = chunkBuffer.slice(0, lineBreakIndex).trim();
+        chunkBuffer = chunkBuffer.slice(lineBreakIndex + 1);
+        lineBreakIndex = chunkBuffer.indexOf('\n');
+
+        if (!line) continue;
+
+        let parsedLine;
+        try {
+          parsedLine = JSON.parse(line);
+        } catch {
+          continue;
+        }
+
+        if (typeof parsedLine.response === 'string') {
+          rawResponse += parsedLine.response;
+          tokenCounter += parsedLine.response.length;
+          const now = Date.now();
+          if (typeof onTokenProgress === 'function' && now - lastProgressAt >= 1200) {
+            onTokenProgress(tokenCounter);
+            lastProgressAt = now;
+          }
+        }
+
+        if (parsedLine.done) {
+          return rawResponse;
+        }
+      }
+    }
+
+    if (chunkBuffer.trim()) {
+      try {
+        const last = JSON.parse(chunkBuffer.trim());
+        if (typeof last.response === 'string') {
+          rawResponse += last.response;
+        }
+      } catch {
+        // Ignora sobra invalida no buffer.
+      }
+    }
+
+    return rawResponse;
+  } catch (error) {
+    if (error?.status) throw error;
+    if (error?.name === 'AbortError') {
+      throw createHttpError(504, `Timeout ao chamar Ollama (${OLLAMA_TIMEOUT_MS}ms).`);
+    }
+    throw createHttpError(503, 'Ollama nao esta acessivel. Verifique se esta rodando localmente.');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getInstalledOllamaModels() {
+  const now = Date.now();
+  if (now - ollamaModelsCache.loadedAt < 30000 && ollamaModelsCache.models.length > 0) {
+    return ollamaModelsCache.models;
+  }
+
+  const payload = await ollamaRequest('/api/tags', { method: 'GET' });
+  const models = Array.isArray(payload.models)
+    ? payload.models
+        .map((model) => (typeof model?.name === 'string' ? model.name : ''))
+        .filter(Boolean)
+    : [];
+
+  ollamaModelsCache = {
+    loadedAt: now,
+    models,
+  };
+
+  return models;
+}
+
+function pickOllamaModel(installedModels) {
+  if (!Array.isArray(installedModels) || installedModels.length === 0) {
+    throw createHttpError(404, 'Nenhum modelo Ollama encontrado. Rode "ollama pull <modelo>".');
+  }
+
+  const preferred = [
+    OLLAMA_MODEL,
+    'llama3.1:70b',
+    'llama3.1:8b',
+    'qwen2.5:7b-instruct',
+    'qwen2.5:7b',
+    'mistral:7b-instruct',
+    'phi4',
+  ].filter(Boolean);
+
+  for (const candidate of preferred) {
+    const normalizedCandidate = normalizeModelId(candidate);
+    const direct = installedModels.find((model) => model.toLowerCase() === candidate.toLowerCase());
+    if (direct) return direct;
+    const relaxed = installedModels.find((model) => normalizeModelId(model) === normalizedCandidate);
+    if (relaxed) return relaxed;
+  }
+
+  return installedModels[0];
+}
+
+function buildTranslatePrompt(requestPayload) {
+  const source = {
+    title: requestPayload.content.title,
+    descriptionHtml: requestPayload.content.descriptionHtml,
+    iconsTooltips: requestPayload.content.iconsTooltips,
+  };
+  const targetsText = requestPayload.targets.join(', ');
+
+  return [
+    'Voce e um tradutor tecnico de conteudo de portfolio.',
+    `Traduza do portugues (pt) para os idiomas: ${targetsText}.`,
+    'Regras obrigatorias:',
+    '- Retorne SOMENTE JSON valido.',
+    '- Preserve exatamente a estrutura HTML de descriptionHtml: mesmas tags, mesma ordem e mesmos atributos.',
+    '- Traduza apenas texto visivel dentro do HTML.',
+    '- Nao altere links, URLs, src, href, caminhos de arquivo.',
+    '- Nao traduza nomes de tecnologias/stacks: HTML, CSS, JavaScript, TypeScript, React, Next.js, Shopify, Node, Express, MongoDB, PostgreSQL, MySQL, Tailwind, Vite, Git, API, GraphQL.',
+    '- Nao traduza nomes proprios, marcas e produtos.',
+    '- Nao adicione explicacoes fora do JSON.',
+    'Formato EXATO da resposta:',
+    '{',
+    '  "en": { "title": "...", "descriptionHtml": "...", "iconsTooltips": ["..."] },',
+    '  "es": { "title": "...", "descriptionHtml": "...", "iconsTooltips": ["..."] }',
+    '}',
+    'Entrada:',
+    JSON.stringify(source),
+  ].join('\n');
+}
+
+function parseAndValidateTranslationResponse(rawResponse, requestPayload) {
+  const parsed = JSON.parse(rawResponse);
+
+  for (const locale of requestPayload.targets) {
+    const localeResult = parsed?.[locale];
+    if (!localeResult || typeof localeResult !== 'object') {
+      throw new Error(`Locale "${locale}" ausente na resposta.`);
+    }
+
+    if (typeof localeResult.title !== 'string') {
+      throw new Error(`Locale "${locale}" sem "title" valido.`);
+    }
+
+    if (typeof localeResult.descriptionHtml !== 'string') {
+      throw new Error(`Locale "${locale}" sem "descriptionHtml" valido.`);
+    }
+
+    if (!Array.isArray(localeResult.iconsTooltips)) {
+      localeResult.iconsTooltips = [];
+    }
+
+    if (
+      requestPayload.content.iconsTooltips.length > 0 &&
+      localeResult.iconsTooltips.length !== requestPayload.content.iconsTooltips.length
+    ) {
+      throw new Error(`Locale "${locale}" retornou quantidade invalida em iconsTooltips.`);
+    }
+
+    assertHtmlStructurePreserved(
+      requestPayload.content.descriptionHtml,
+      localeResult.descriptionHtml,
+      locale
+    );
+
+    localeResult.descriptionHtml = sanitizeProjectDescription(localeResult.descriptionHtml);
+    localeResult.title = localeResult.title.trim();
+    localeResult.iconsTooltips = localeResult.iconsTooltips.map((item) => String(item || '').trim());
+  }
+
+  return parsed;
+}
+
+async function translateContentWithOllama(requestPayload, options = {}) {
+  const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+  const notify = (message, level = 'info') => {
+    if (!onProgress) return;
+    onProgress(message, level);
+  };
+
+  notify('Validando modelos disponiveis no Ollama...');
+  const installedModels = await getInstalledOllamaModels();
+  const model = pickOllamaModel(installedModels);
+  notify(`Modelo selecionado: ${model}`);
+  const basePrompt = buildTranslatePrompt(requestPayload);
+
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= OLLAMA_MAX_RETRIES; attempt += 1) {
+    const correctionPrompt =
+      attempt === 0
+        ? basePrompt
+        : `${basePrompt}\n\nA resposta anterior estava invalida. Retorne SOMENTE JSON valido, sem texto extra.`;
+
+    try {
+      notify(`Tentativa ${attempt + 1} de ${OLLAMA_MAX_RETRIES + 1}: gerando traducao...`);
+      const rawResponse = await ollamaGenerateRawResponse({
+        model,
+        prompt: correctionPrompt,
+        onTokenProgress: (tokenCounter) =>
+          notify(`LLM em execucao... ${tokenCounter} caracteres recebidos.`),
+      });
+      notify('Resposta recebida. Validando JSON e estrutura HTML...');
+
+      const parsed = parseAndValidateTranslationResponse(rawResponse, requestPayload);
+      notify('Traducoes validadas com sucesso.', 'success');
+      return parsed;
+    } catch (error) {
+      lastError = error;
+      notify(`Falha na tentativa ${attempt + 1}: ${error.message}`, 'warn');
+      if (error?.status && error.status >= 500) {
+        break;
+      }
+    }
+  }
+
+  if (lastError?.status) {
+    throw lastError;
+  }
+  throw createHttpError(
+    502,
+    `Nao foi possivel traduzir com o Ollama. Detalhe: ${lastError?.message || 'resposta invalida.'}`
+  );
+}
+
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
@@ -876,6 +1298,75 @@ app.get(
     res.sendFile(absolutePath);
   })
 );
+
+app.post(
+  '/api/translate',
+  asyncHandler(async (req, res) => {
+    const requestPayload = normalizeTranslateRequest(req.body);
+    const translated = await translateContentWithOllama(requestPayload);
+
+    const responsePayload = {};
+    for (const locale of requestPayload.targets) {
+      responsePayload[locale] = {
+        title: translated[locale].title,
+        descriptionHtml: translated[locale].descriptionHtml,
+        iconsTooltips: translated[locale].iconsTooltips,
+      };
+    }
+
+    res.json(responsePayload);
+  })
+);
+
+app.post('/api/translate/stream', async (req, res) => {
+  const writeEvent = (event, payload = {}) => {
+    res.write(`${JSON.stringify({ event, ...payload })}\n`);
+  };
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const heartbeat = setInterval(() => {
+    writeEvent('ping', { ts: Date.now() });
+  }, 5000);
+
+  try {
+    const requestPayload = normalizeTranslateRequest(req.body);
+    writeEvent('log', { level: 'info', message: 'Payload validado. Preparando traducao...' });
+
+    const translated = await translateContentWithOllama(requestPayload, {
+      onProgress: (message, level = 'info') => {
+        writeEvent('log', { level, message });
+      },
+    });
+
+    const responsePayload = {};
+    for (const locale of requestPayload.targets) {
+      responsePayload[locale] = {
+        title: translated[locale].title,
+        descriptionHtml: translated[locale].descriptionHtml,
+        iconsTooltips: translated[locale].iconsTooltips,
+      };
+    }
+
+    writeEvent('result', { translations: responsePayload });
+  } catch (error) {
+    const status = error?.status || 500;
+    const message = error?.message || 'Erro interno do servidor.';
+
+    if (status >= 500) {
+      console.error('[ERROR]', error);
+    } else {
+      console.warn('[WARN]', message);
+    }
+
+    writeEvent('error', { status, message });
+  } finally {
+    clearInterval(heartbeat);
+    res.end();
+  }
+});
 
 app.post(
   '/api/projects',
@@ -1034,6 +1525,11 @@ async function bootstrap() {
       thumbWidth: THUMB_MAX_WIDTH,
       galleryWidth: GALLERY_MAX_WIDTH,
       webpQuality: WEBP_QUALITY,
+    });
+    console.log('[uploader-api] ollama:', {
+      url: OLLAMA_URL,
+      modelPreference: OLLAMA_MODEL,
+      timeoutMs: OLLAMA_TIMEOUT_MS,
     });
   });
 }

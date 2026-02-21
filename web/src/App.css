@@ -260,6 +260,11 @@
   font-weight: 700;
 }
 
+.locale-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .locale-editor {
   margin-top: var(--margin);
   display: grid;
@@ -376,7 +381,7 @@
 }
 
 .alert {
-  margin: 0 0 10px;
+  margin: 0 0 var(--margin);
   border-radius: 10px;
   padding: 9px 12px;
   border: 1px solid;
@@ -475,6 +480,11 @@
   outline-offset: 1px;
 }
 
+.icon-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 .icon-btn.icon-only {
   padding: 8px;
   width: 36px;
@@ -494,14 +504,31 @@
   cursor: not-allowed;
 }
 
+.icon-btn.is-loading .icon-btn-glyph {
+  animation: spin-glyph 1s linear infinite;
+}
+
+@keyframes spin-glyph {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .icon-btn-secondary {
   background-color: var(--secondary-color);
   color: #000000;
 }
 
 .icon-btn-danger {
-  background: transparent;
+  background-color: transparent;
   color: var(--danger, #b5412a);
+}
+.icon-btn-back {
+  background-color: transparent;
+  color: white;
 }
 
 .rich-editor-shell {
@@ -706,4 +733,129 @@
 
 .source-actions {
   margin-top: 8px;
+}
+
+.llm-console-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.llm-console-modal {
+  width: min(920px, 100%);
+  min-height: 420px;
+  max-height: 78vh;
+  border-radius: 10px;
+  border: 1px solid #4f4f4f;
+  background: #0b0b0b;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+
+.llm-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid #303030;
+  color: #d7d7d7;
+  background: #131313;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.llm-console-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.llm-console-badge {
+  font-size: 0.75rem;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #4b4b4b;
+}
+
+.llm-console-badge.status-running {
+  color: #ffd26f;
+  border-color: #8f7132;
+}
+
+.llm-console-badge.status-success {
+  color: #8ef0a0;
+  border-color: #377d43;
+}
+
+.llm-console-badge.status-error {
+  color: #ff8e8e;
+  border-color: #8d3f3f;
+}
+
+.llm-console-close {
+  border: 1px solid #4d4d4d;
+  background: #1a1a1a;
+  color: #d0d0d0;
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.llm-console-close:hover {
+  background: #232323;
+}
+
+.llm-console-body {
+  padding: 12px;
+  overflow: auto;
+  background: #0d0d0d;
+  font-family: Consolas, "Courier New", monospace;
+  scrollbar-width: thin;
+  scrollbar-color: #707070 #1a1a1a;
+}
+
+.llm-console-body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.llm-console-body::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.llm-console-body::-webkit-scrollbar-thumb {
+  background: #707070;
+}
+
+.llm-console-line {
+  margin: 0 0 6px;
+  line-height: 1.4;
+  color: #c6d5c6;
+  word-break: break-word;
+}
+
+.llm-console-line.level-info {
+  color: #c6d5c6;
+}
+
+.llm-console-line.level-warn {
+  color: #ffdb8a;
+}
+
+.llm-console-line.level-error {
+  color: #ff8e8e;
+}
+
+.llm-console-line.level-success {
+  color: #8ef0a0;
+}
+
+.llm-console-line.muted {
+  color: #8f8f8f;
 }

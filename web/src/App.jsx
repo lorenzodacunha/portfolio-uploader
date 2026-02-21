@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  faCopy,
   faFloppyDisk,
   faGripVertical,
   faPlus,
   faRotate,
+  faTerminal,
   faTrash,
+  faWandMagicSparkles,
 } from '@fortawesome/free-solid-svg-icons';
 import './App.css';
 import FileUploadDropzone from './components/FileUploadDropzone';
@@ -114,10 +115,15 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
   const [form, setForm] = useState(emptyForm());
   const [draggingGalleryId, setDraggingGalleryId] = useState('');
+  const [isConsoleOpen, setIsConsoleOpen] = useState(false);
+  const [consoleLogs, setConsoleLogs] = useState([]);
+  const [consoleStatus, setConsoleStatus] = useState('idle');
+  const consoleBodyRef = useRef(null);
 
   const replaceForm = (nextForm) => {
     setForm((previous) => {
@@ -157,6 +163,24 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!isConsoleOpen || !consoleBodyRef.current) return;
+    consoleBodyRef.current.scrollTop = consoleBodyRef.current.scrollHeight;
+  }, [consoleLogs, isConsoleOpen]);
+
+  const appendConsoleLog = (message, level = 'info') => {
+    const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false });
+    setConsoleLogs((current) => [
+      ...current,
+      {
+        id: createId(),
+        timestamp,
+        level,
+        message: String(message || ''),
+      },
+    ]);
+  };
 
   const filteredProjects = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
@@ -375,21 +399,156 @@ function App() {
     });
   };
 
-  const copyPtToOtherLocales = () => {
-    setForm((current) => ({
-      ...current,
-      locales: {
-        ...current.locales,
-        en: {
-          title: current.locales.pt.title,
-          description: current.locales.pt.description,
+  const translatePtToOtherLocales = async () => {
+    setError('');
+    setFeedback('');
+
+    const ptTitle = (form.locales.pt?.title || '').trim();
+    const ptDescription = sanitizeRichTextHtml(form.locales.pt?.description || '');
+    if (!ptTitle && !ptDescription.trim()) {
+      setError('Preencha titulo ou descricao em PT antes de traduzir.');
+      return;
+    }
+
+    const hasContentInTargets = ['en', 'es'].some((locale) => {
+      const localeData = form.locales[locale] || {};
+      return (localeData.title || '').trim() || (localeData.description || '').trim();
+    });
+
+    let shouldOverwrite = true;
+    if (hasContentInTargets) {
+      shouldOverwrite = window.confirm(
+        'EN/ES ja possuem conteudo. Clique OK para sobrescrever tudo. Clique Cancelar para preencher apenas campos vazios.'
+      );
+    }
+
+    setIsTranslating(true);
+    setIsConsoleOpen(true);
+    setConsoleStatus('running');
+    setConsoleLogs([]);
+    appendConsoleLog('Iniciando traducao com Ollama...', 'info');
+    try {
+      const response = await fetch(`${API_BASE}/api/translate/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
         },
-        es: {
-          title: current.locales.pt.title,
-          description: current.locales.pt.description,
-        },
-      },
-    }));
+        body: JSON.stringify({
+          sourceLang: 'pt',
+          targets: ['en', 'es'],
+          content: {
+            title: ptTitle,
+            descriptionHtml: ptDescription,
+            iconsTooltips: [],
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.message || 'Falha ao iniciar traducao.');
+      }
+
+      if (!response.body) {
+        throw new Error('Nao foi possivel acompanhar o progresso da traducao.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let streamError = null;
+      let translatedPayload = null;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let lineBreak = buffer.indexOf('\n');
+        while (lineBreak >= 0) {
+          const rawLine = buffer.slice(0, lineBreak).trim();
+          buffer = buffer.slice(lineBreak + 1);
+          lineBreak = buffer.indexOf('\n');
+
+          if (!rawLine) continue;
+
+          let eventPayload;
+          try {
+            eventPayload = JSON.parse(rawLine);
+          } catch {
+            continue;
+          }
+
+          if (eventPayload.event === 'ping') {
+            continue;
+          }
+
+          if (eventPayload.event === 'log') {
+            appendConsoleLog(eventPayload.message || 'Processando...', eventPayload.level || 'info');
+            continue;
+          }
+
+          if (eventPayload.event === 'error') {
+            streamError = new Error(eventPayload.message || 'Falha na traducao via Ollama.');
+            break;
+          }
+
+          if (eventPayload.event === 'result') {
+            translatedPayload = eventPayload.translations || null;
+          }
+        }
+
+        if (streamError) break;
+      }
+
+      if (streamError) {
+        throw streamError;
+      }
+
+      if (!translatedPayload) {
+        throw new Error('A traducao terminou sem resultado valido.');
+      }
+
+      setForm((current) => {
+        const nextLocales = { ...current.locales };
+
+        ['en', 'es'].forEach((locale) => {
+          const translated = translatedPayload?.[locale];
+          if (!translated) return;
+          const currentLocale = current.locales[locale] || { title: '', description: '' };
+          const translatedTitle = String(translated.title || '').trim();
+          const translatedDescription = sanitizeRichTextHtml(
+            String(translated.descriptionHtml || '')
+          );
+
+          nextLocales[locale] = {
+            title:
+              shouldOverwrite || !String(currentLocale.title || '').trim()
+                ? translatedTitle
+                : currentLocale.title,
+            description:
+              shouldOverwrite || !String(currentLocale.description || '').trim()
+                ? translatedDescription
+                : currentLocale.description,
+          };
+        });
+
+        return {
+          ...current,
+          locales: nextLocales,
+        };
+      });
+
+      appendConsoleLog('Traducoes aplicadas em EN/ES.', 'success');
+      setConsoleStatus('success');
+      setFeedback('Traducoes geradas com IA. Revise EN e ES antes de salvar.');
+    } catch (requestError) {
+      appendConsoleLog(requestError.message || 'Erro inesperado durante a traducao.', 'error');
+      setConsoleStatus('error');
+      setError(requestError.message);
+    } finally {
+      setIsTranslating(false);
+    }
   };
 
   const validateBeforeSave = () => {
@@ -764,9 +923,18 @@ function App() {
           <section className="block">
             <div className="block-header">
               <h3>Conteudo por idioma</h3>
-              <IconButton icon={faCopy} variant="secondary" onClick={copyPtToOtherLocales}>
-                Copiar PT para EN/ES
-              </IconButton>
+              <div className="locale-actions">
+                <IconButton icon={faTerminal} variant="back" iconOnly onClick={() => setIsConsoleOpen(true)}></IconButton>
+                <IconButton
+                  icon={faWandMagicSparkles}
+                  variant="primary"
+                  className={isTranslating ? 'is-loading' : ''}
+                  onClick={translatePtToOtherLocales}
+                  disabled={isTranslating}
+                >
+                  {isTranslating ? 'Traduzindo...' : 'Traduzir com IA'}
+                </IconButton>
+              </div>
             </div>
 
             <div className="locale-tabs">
@@ -898,6 +1066,51 @@ function App() {
           </div>
         </section>
       </main>
+
+      {isConsoleOpen ? (
+        <div className="llm-console-backdrop" role="presentation" onClick={() => setIsConsoleOpen(false)}>
+          <div
+            className={`llm-console-modal status-${consoleStatus}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Console da traducao"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="llm-console-header">
+              <strong>OLLAMA CONSOLE</strong>
+              <div className="llm-console-header-actions">
+                <span className={`llm-console-badge status-${consoleStatus}`}>
+                  {consoleStatus === 'running'
+                    ? 'RUNNING'
+                    : consoleStatus === 'success'
+                      ? 'SUCCESS'
+                      : consoleStatus === 'error'
+                        ? 'ERROR'
+                        : 'IDLE'}
+                </span>
+                <button
+                  type="button"
+                  className="llm-console-close"
+                  onClick={() => setIsConsoleOpen(false)}
+                >
+                  EXIT
+                </button>
+              </div>
+            </div>
+            <div className="llm-console-body" ref={consoleBodyRef}>
+              {consoleLogs.length === 0 ? (
+                <p className="llm-console-line muted">Aguardando logs...</p>
+              ) : (
+                consoleLogs.map((entry) => (
+                  <p key={entry.id} className={`llm-console-line level-${entry.level || 'info'}`}>
+                    <span>[{entry.timestamp}]</span> {entry.message}
+                  </p>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

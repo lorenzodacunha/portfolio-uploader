@@ -57,6 +57,7 @@ const PROJECT_FIELD_ORDER = [
   'githubUrlLink',
   'developed',
   'adult',
+  'featured',
   'developingPorcentage',
   'icons',
   'compatibility',
@@ -243,6 +244,7 @@ function pickCommonFields(project) {
     githubUrlLink: project.githubUrlLink,
     developed: project.developed,
     adult: Boolean(project.adult),
+    featured: Boolean(project.featured),
     developingPorcentage: project.developingPorcentage,
     compatibility: project.compatibility,
     icons: Array.isArray(project.icons) ? project.icons : [],
@@ -279,6 +281,7 @@ function buildProjectObject(existingProject, projectId, localeInput, commonInput
     githubUrlLink: commonInput.githubUrlLink.trim(),
     developed: commonInput.developed,
     adult: Boolean(commonInput.adult),
+    featured: Boolean(commonInput.featured),
     developingPorcentage: commonInput.developingPorcentage,
     icons: commonInput.icons.map((icon) => ({
       class: icon.class.trim(),
@@ -642,6 +645,11 @@ function validatePayloadShape(payload) {
     common.adult = false;
   } else if (typeof common.adult !== 'boolean') {
     errors.push('Campo "adult" deve ser booleano.');
+  }
+  if (common.featured === undefined) {
+    common.featured = false;
+  } else if (typeof common.featured !== 'boolean') {
+    errors.push('Campo "featured" deve ser booleano.');
   }
   if (
     typeof common.developingPorcentage !== 'number' ||
@@ -1444,6 +1452,7 @@ app.get(
           endDate: project.endDate,
           developed: project.developed,
           adult: Boolean(project.adult),
+          featured: Boolean(project.featured),
           compatibility: project.compatibility,
           icons: Array.isArray(project.icons) ? project.icons : [],
         });

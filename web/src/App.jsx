@@ -241,6 +241,7 @@ const emptyCommon = () => ({
   githubUrlLink: '',
   developed: true,
   adult: false,
+  featured: false,
   developingPorcentage: 100,
   compatibility: 3,
   icons: [],
@@ -961,6 +962,7 @@ function App() {
           ...emptyCommon(),
           ...(data.common || {}),
           adult: Boolean(data.common?.adult),
+          featured: Boolean(data.common?.featured),
           compatibility: Number(data.common?.compatibility || 3),
           developingPorcentage: Number(data.common?.developingPorcentage || 0),
           icons: Array.isArray(data.common?.icons) ? data.common.icons : [],
@@ -1525,6 +1527,9 @@ function App() {
     if (typeof form.common.adult !== 'boolean') {
       validationErrors.push('Conteudo +18 deve ser verdadeiro ou falso.');
     }
+    if (typeof form.common.featured !== 'boolean') {
+      validationErrors.push('Projeto destaque deve ser verdadeiro ou falso.');
+    }
 
     if (
       Number.isNaN(Number(form.common.developingPorcentage)) ||
@@ -1557,6 +1562,7 @@ function App() {
       common: {
         ...form.common,
         adult: Boolean(form.common.adult),
+        featured: Boolean(form.common.featured),
         compatibility: Number(form.common.compatibility),
         developingPorcentage: Number(form.common.developingPorcentage),
         icons: normalizedIcons,
@@ -1910,6 +1916,14 @@ function App() {
                 onChange={(event) => updateCommon('adult', event.target.checked)}
               />
               Conteudo +18
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={Boolean(form.common.featured)}
+                onChange={(event) => updateCommon('featured', event.target.checked)}
+              />
+              Projeto destaque?
             </label>
 
             <label>

@@ -10,6 +10,7 @@ Mini app local para criar/editar projetos do portfolio com:
 - card de rascunho "em desenvolvimento" na lista de projetos para retomar edicao
 - conversao/otimizacao de novos uploads para WebP (thumb + galeria)
 - validacao de campos obrigatorios e unicidade de id
+- suporte aos flags `adult` (+18) e `featured` (projeto em destaque)
 - descricao com editor rich text (toolbar + modo HTML)
 - traducao automatica PT -> EN/ES com IA local (Ollama)
 - copia de imagens para os diretorios reais usados pelo portfolio em producao
@@ -68,7 +69,7 @@ App web: `http://localhost:5173`
 3. Preencha todos os campos:
    - categoria
    - `id` (gerado automaticamente, somente leitura)
-   - datas e links
+   - datas, links e flags (`Projeto concluido`, `Conteudo +18`, `Projeto destaque?`)
    - stacks/tecnologias (`class` + `tooltip`)
    - titulo/descricao para `pt`, `en`, `es`
 4. Na thumbnail, escolha o modo:

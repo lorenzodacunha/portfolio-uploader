@@ -13,6 +13,11 @@ import FileUploadDropzone from './components/FileUploadDropzone';
 import IconButton from './components/IconButton';
 import RichTextEditor from './components/RichTextEditor';
 import { sanitizeRichTextHtml } from './components/richTextSanitize';
+import {
+  clearCreateDraftFromDb,
+  loadCreateDraftFromDb,
+  saveCreateDraftToDb,
+} from './lib/createDraftIndexedDb';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3333';
 const DEFAULT_LOCALES = ['pt', 'en', 'es'];
@@ -22,12 +27,26 @@ const DEFAULT_SPLIT_OVERLAP = 120;
 const THUMB_PREVIEW_WIDTH = 248;
 const THUMB_PREVIEW_HEIGHT = Math.round(THUMB_PREVIEW_WIDTH / (195 / 113));
 const DEFAULT_LOGO_PADDING_PERCENT = 15;
+const MAX_PDF_PAGES = 80;
 
 const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const createProjectPersistentId = () =>
   `prj_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
 
 const waitNextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+let pdfRuntimePromise = null;
+
+async function getPdfRuntime() {
+  if (!pdfRuntimePromise) {
+    pdfRuntimePromise = (async () => {
+      const pdfModule = await import('pdfjs-dist/legacy/build/pdf');
+      const workerModule = await import('pdfjs-dist/build/pdf.worker.min.mjs?url');
+      pdfModule.GlobalWorkerOptions.workerSrc = workerModule.default;
+      return pdfModule;
+    })();
+  }
+  return pdfRuntimePromise;
+}
 
 function readImageFromFile(file) {
   return new Promise((resolve, reject) => {
@@ -60,6 +79,50 @@ function canvasToPngFile(canvas, fileName) {
       );
     }, 'image/png');
   });
+}
+
+function isPdfFile(file) {
+  const fileName = String(file?.name || '').toLowerCase();
+  return file?.type === 'application/pdf' || fileName.endsWith('.pdf');
+}
+
+async function convertPdfToPngFiles(file) {
+  const { getDocument } = await getPdfRuntime();
+  const fileBaseName = String(file.name || 'documento').replace(/\.[^/.]+$/, '');
+  const bytes = await file.arrayBuffer();
+  const pdf = await getDocument({ data: bytes }).promise;
+
+  if (pdf.numPages > MAX_PDF_PAGES) {
+    throw new Error(`PDF com ${pdf.numPages} paginas excede o limite de ${MAX_PDF_PAGES}.`);
+  }
+
+  const pageFiles = [];
+  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    const page = await pdf.getPage(pageNumber);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const renderScale = SPLIT_FRAME_WIDTH / Math.max(1, baseViewport.width);
+    const viewport = page.getViewport({ scale: renderScale });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(viewport.width));
+    canvas.height = Math.max(1, Math.round(viewport.height));
+    const context = canvas.getContext('2d');
+
+    if (!context) {
+      throw new Error('Falha ao inicializar canvas para conversao de PDF.');
+    }
+
+    await page.render({
+      canvasContext: context,
+      viewport,
+    }).promise;
+
+    const pageSuffix = String(pageNumber).padStart(3, '0');
+    const pageFile = await canvasToPngFile(canvas, `${fileBaseName}__page-${pageSuffix}.png`);
+    pageFiles.push(pageFile);
+    await waitNextFrame();
+  }
+
+  return pageFiles;
 }
 
 async function splitTallImageFile(file, overlapPx) {
@@ -177,6 +240,7 @@ const emptyCommon = () => ({
   linkedinUrlLink: '',
   githubUrlLink: '',
   developed: true,
+  adult: false,
   developingPorcentage: 100,
   compatibility: 3,
   icons: [],
@@ -201,6 +265,258 @@ const emptyForm = (category = '') => ({
   gallery: [],
 });
 
+function isDraftMeaningful(form) {
+  if (!form) return false;
+  if (String(form.category || '').trim()) return true;
+
+  for (const locale of DEFAULT_LOCALES) {
+    const localeData = form.locales?.[locale];
+    if (!localeData) continue;
+    if (String(localeData.title || '').trim()) return true;
+    if (String(localeData.description || '').trim()) return true;
+  }
+
+  if (String(form.common?.initialDate || '').trim()) return true;
+  if (String(form.common?.endDate || '').trim()) return true;
+  if (String(form.common?.projectUrlLink || '').trim()) return true;
+  if (String(form.common?.linkedinUrlLink || '').trim()) return true;
+  if (String(form.common?.githubUrlLink || '').trim()) return true;
+  if (Array.isArray(form.common?.icons) && form.common.icons.length > 0) return true;
+
+  if (form.thumbnail?.kind && form.thumbnail.kind !== 'none') return true;
+  if (Array.isArray(form.gallery) && form.gallery.length > 0) return true;
+
+  return false;
+}
+
+function buildDraftBinaryPayload(form) {
+  if (!form) return null;
+
+  const fileEntries = [];
+  const fileSignatureTokens = [];
+  const nextId = String(form.id || createProjectPersistentId());
+
+  const snapshot = {
+    version: 2,
+    id: nextId,
+    category: String(form.category || ''),
+    common: {
+      ...emptyCommon(),
+      ...(form.common || {}),
+      icons: Array.isArray(form.common?.icons) ? form.common.icons : [],
+    },
+    locales: {
+      ...emptyLocales(),
+      ...(form.locales || {}),
+    },
+    thumbnail: {
+      mode: form.thumbnail?.mode === 'logoColor' ? 'logoColor' : 'image',
+      kind: 'none',
+      path: '',
+      id: '',
+      fileKey: '',
+      logo: {
+        id: '',
+        fileKey: '',
+      },
+      backgroundColor: String(form.thumbnail?.backgroundColor || '#1f1f1f'),
+      paddingPercent: Number(form.thumbnail?.paddingPercent ?? DEFAULT_LOGO_PADDING_PERCENT),
+    },
+    gallery: [],
+  };
+
+  const addFileEntry = (fileKey, file) => {
+    if (!fileKey || !file) return;
+    fileEntries.push({ fileKey, file });
+    fileSignatureTokens.push(
+      `${fileKey}:${file.name}:${file.size}:${file.lastModified}:${file.type || ''}`
+    );
+  };
+
+  if (snapshot.thumbnail.mode === 'logoColor') {
+    snapshot.thumbnail.logo.id = String(form.thumbnail?.logo?.id || 'logo');
+    if (form.thumbnail?.logo?.file) {
+      snapshot.thumbnail.kind = 'new';
+      snapshot.thumbnail.logo.fileKey = `thumbnail_logo:${snapshot.thumbnail.logo.id}`;
+      addFileEntry(snapshot.thumbnail.logo.fileKey, form.thumbnail.logo.file);
+    } else if (form.thumbnail?.kind === 'existing' && form.thumbnail?.path) {
+      snapshot.thumbnail.kind = 'existing';
+      snapshot.thumbnail.path = form.thumbnail.path;
+    }
+  } else if (form.thumbnail?.kind === 'new' && form.thumbnail?.file) {
+    snapshot.thumbnail.kind = 'new';
+    snapshot.thumbnail.id = String(form.thumbnail?.id || 'thumbnail');
+    snapshot.thumbnail.fileKey = `thumbnail_image:${snapshot.thumbnail.id}`;
+    addFileEntry(snapshot.thumbnail.fileKey, form.thumbnail.file);
+  } else if (form.thumbnail?.kind === 'existing' && form.thumbnail?.path) {
+    snapshot.thumbnail.kind = 'existing';
+    snapshot.thumbnail.path = form.thumbnail.path;
+  }
+
+  const galleryList = Array.isArray(form.gallery) ? form.gallery : [];
+  snapshot.gallery = galleryList.map((item) => {
+    if (item.kind === 'new' && item.file) {
+      const itemId = String(item.id || createId());
+      const fileKey = `gallery:${itemId}`;
+      addFileEntry(fileKey, item.file);
+      return {
+        kind: 'new',
+        id: itemId,
+        name: item.name || item.file.name,
+        fileKey,
+      };
+    }
+    return {
+      kind: 'existing',
+      id: String(item.id || createId()),
+      path: item.path,
+      name: item.name || String(item.path || '').split('/').at(-1),
+    };
+  });
+
+  fileSignatureTokens.sort();
+  return {
+    snapshot,
+    fileEntries,
+    filesSignature: fileSignatureTokens.join('|'),
+  };
+}
+
+function hydrateCreateDraftFromBinary(payload, fallbackCategory = '') {
+  const base = emptyForm(fallbackCategory);
+  if (!payload?.snapshot || typeof payload.snapshot !== 'object') {
+    return {
+      form: base,
+      missingFileCount: 0,
+    };
+  }
+
+  const snapshot = payload.snapshot;
+  const filesByKey = payload.filesByKey || new Map();
+  let missingFileCount = 0;
+
+  const nextForm = {
+    ...base,
+    id: String(snapshot.id || base.id),
+    category: String(snapshot.category || fallbackCategory || ''),
+    common: {
+      ...base.common,
+      ...(snapshot.common || {}),
+      icons: Array.isArray(snapshot.common?.icons) ? snapshot.common.icons : [],
+    },
+    locales: {
+      ...base.locales,
+      ...(snapshot.locales || {}),
+    },
+    thumbnail: {
+      ...base.thumbnail,
+      mode: snapshot.thumbnail?.mode === 'logoColor' ? 'logoColor' : 'image',
+      backgroundColor: String(snapshot.thumbnail?.backgroundColor || '#1f1f1f'),
+      paddingPercent: Number(snapshot.thumbnail?.paddingPercent ?? DEFAULT_LOGO_PADDING_PERCENT),
+    },
+    gallery: [],
+  };
+
+  if (snapshot.thumbnail?.kind === 'existing' && snapshot.thumbnail?.path) {
+    nextForm.thumbnail = {
+      ...nextForm.thumbnail,
+      kind: 'existing',
+      path: snapshot.thumbnail.path,
+      preview: toAssetPreviewUrl(snapshot.thumbnail.path),
+    };
+  } else if (snapshot.thumbnail?.kind === 'new') {
+    if (nextForm.thumbnail.mode === 'logoColor') {
+      const logoFile = filesByKey.get(snapshot.thumbnail?.logo?.fileKey || '');
+      if (logoFile) {
+        nextForm.thumbnail = {
+          ...nextForm.thumbnail,
+          kind: 'new',
+          logo: {
+            id: String(snapshot.thumbnail?.logo?.id || createId()),
+            file: logoFile,
+            name: logoFile.name,
+          },
+        };
+      } else {
+        missingFileCount += 1;
+      }
+    } else {
+      const thumbFile = filesByKey.get(snapshot.thumbnail?.fileKey || '');
+      if (thumbFile) {
+        nextForm.thumbnail = {
+          ...nextForm.thumbnail,
+          kind: 'new',
+          id: String(snapshot.thumbnail?.id || createId()),
+          file: thumbFile,
+          preview: URL.createObjectURL(thumbFile),
+        };
+      } else {
+        missingFileCount += 1;
+      }
+    }
+  }
+
+  const gallerySnapshot = Array.isArray(snapshot.gallery) ? snapshot.gallery : [];
+  nextForm.gallery = gallerySnapshot.flatMap((item) => {
+    if (item.kind === 'existing' && item.path) {
+      return [
+        {
+          id: String(item.id || createId()),
+          kind: 'existing',
+          path: item.path,
+          preview: toAssetPreviewUrl(item.path),
+          name: item.name || String(item.path).split('/').at(-1),
+          file: null,
+        },
+      ];
+    }
+    if (item.kind === 'new' && item.fileKey) {
+      const file = filesByKey.get(item.fileKey);
+      if (!file) {
+        missingFileCount += 1;
+        return [];
+      }
+      return [
+        {
+          id: String(item.id || createId()),
+          kind: 'new',
+          path: '',
+          preview: URL.createObjectURL(file),
+          name: item.name || file.name,
+          file,
+        },
+      ];
+    }
+    return [];
+  });
+
+  return {
+    form: nextForm,
+    missingFileCount,
+  };
+}
+
+function detachCreateDraftWithFreshPreviews(sourceForm, fallbackCategory = '') {
+  const payload = buildDraftBinaryPayload(sourceForm);
+  if (!payload?.snapshot) {
+    return emptyForm(fallbackCategory);
+  }
+
+  const filesByKey = new Map();
+  payload.fileEntries.forEach((entry) => {
+    if (!entry?.fileKey || !entry?.file) return;
+    filesByKey.set(entry.fileKey, entry.file);
+  });
+
+  return hydrateCreateDraftFromBinary(
+    {
+      snapshot: payload.snapshot,
+      filesByKey,
+    },
+    fallbackCategory
+  ).form;
+}
+
 function revokeObjectUrls(form) {
   if (!form) return;
   if (form.thumbnail?.kind === 'new' && form.thumbnail.preview) {
@@ -222,9 +538,10 @@ function toAssetPreviewUrl(relativePath) {
 }
 
 function getStackIconFileName(iconClass) {
-  if (!iconClass) return '';
-  if (iconClass === 'c') return 'C.svg';
-  return `${iconClass}.svg`;
+  const normalized = String(iconClass || '').trim().toLowerCase();
+  if (!normalized) return '';
+  if (normalized === 'c') return 'C.svg';
+  return `${normalized}.svg`;
 }
 
 function StackIcon({ iconClass, alt }) {
@@ -290,6 +607,10 @@ function App() {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
+  const [createDraft, setCreateDraft] = useState(emptyForm());
+  const [isDraftHydrated, setIsDraftHydrated] = useState(false);
+  const draftSaveTimerRef = useRef(null);
+  const draftFileSignatureRef = useRef('');
 
   const replaceForm = (nextForm) => {
     setForm((previous) => {
@@ -306,6 +627,7 @@ function App() {
   const loadMetaAndProjects = async () => {
     setIsLoading(true);
     setError('');
+    setIsDraftHydrated(false);
     try {
       const [metaResponse] = await Promise.all([apiRequest('/api/meta'), refreshProjects()]);
       setMeta({
@@ -314,10 +636,28 @@ function App() {
         locales: metaResponse.locales || DEFAULT_LOCALES,
       });
       const defaultCategory = (metaResponse.categories || [])[0] || '';
-      replaceForm(emptyForm(defaultCategory));
+      const persistedDraft = await loadCreateDraftFromDb();
+      if (persistedDraft?.snapshot) {
+        const restored = hydrateCreateDraftFromBinary(persistedDraft, defaultCategory);
+        setCreateDraft(restored.form);
+        const initialPayload = buildDraftBinaryPayload(restored.form);
+        draftFileSignatureRef.current = initialPayload?.filesSignature || '';
+        replaceForm(restored.form);
+        if (restored.missingFileCount > 0) {
+          setFeedback(
+            `Rascunho restaurado com ${restored.missingFileCount} arquivo(s) indisponivel(is).`
+          );
+        }
+      } else {
+        const blank = emptyForm(defaultCategory);
+        setCreateDraft(blank);
+        draftFileSignatureRef.current = '';
+        replaceForm(blank);
+      }
     } catch (requestError) {
       setError(requestError.message);
     } finally {
+      setIsDraftHydrated(true);
       setIsLoading(false);
     }
   };
@@ -326,9 +666,60 @@ function App() {
     loadMetaAndProjects();
     return () => {
       revokeObjectUrls(form);
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (mode !== 'create') return;
+    setCreateDraft(form);
+  }, [form, mode]);
+
+  useEffect(() => {
+    if (!isDraftHydrated) {
+      return undefined;
+    }
+    if (mode !== 'create') {
+      return undefined;
+    }
+
+    if (!isDraftMeaningful(createDraft)) {
+      draftFileSignatureRef.current = '';
+      void clearCreateDraftFromDb();
+      return;
+    }
+
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = setTimeout(() => {
+      const payload = buildDraftBinaryPayload(createDraft);
+      if (!payload) return;
+      const hasFileChanges = draftFileSignatureRef.current !== payload.filesSignature;
+      void saveCreateDraftToDb({
+        snapshot: payload.snapshot,
+        fileEntries: hasFileChanges ? payload.fileEntries : [],
+        replaceFiles: hasFileChanges,
+      })
+        .then(() => {
+          if (hasFileChanges) {
+            draftFileSignatureRef.current = payload.filesSignature;
+          }
+        })
+        .catch((saveError) => {
+          console.warn('[draft-save]', saveError?.message || saveError);
+        });
+    }, 350);
+
+    return () => {
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+      }
+    };
+  }, [createDraft, mode, isDraftHydrated]);
 
   useEffect(() => {
     if (!isConsoleOpen || !consoleBodyRef.current) return;
@@ -416,7 +807,24 @@ function App() {
 
   const filteredProjects = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
-    return projects.filter((project) => {
+    const persistedDraftVisible = isDraftMeaningful(createDraft)
+      ? {
+          id: createDraft.id,
+          slug: 'rascunho',
+          category: createDraft.category || meta.categories[0] || 'sem-categoria',
+          index: -1,
+          title: (createDraft.locales?.pt?.title || '').trim() || 'Novo projeto (rascunho)',
+          image: createDraft.thumbnail?.preview
+            ? createDraft.thumbnail.preview
+            : createDraft.thumbnail?.path || '',
+          developed: false,
+          compatibility: Number(createDraft.common?.compatibility || 3),
+          icons: Array.isArray(createDraft.common?.icons) ? createDraft.common.icons : [],
+          isDraft: true,
+        }
+      : null;
+
+    const normalizedList = projects.filter((project) => {
       if (categoryFilter !== 'all' && project.category !== categoryFilter) {
         return false;
       }
@@ -427,12 +835,48 @@ function App() {
         (project.slug || '').toLowerCase().includes(normalizedSearch)
       );
     });
-  }, [projects, search, categoryFilter]);
+
+    if (!persistedDraftVisible) {
+      return normalizedList;
+    }
+
+    if (
+      categoryFilter !== 'all' &&
+      persistedDraftVisible.category !== categoryFilter
+    ) {
+      return normalizedList;
+    }
+
+    if (normalizedSearch) {
+      const searchable = [
+        persistedDraftVisible.title.toLowerCase(),
+        persistedDraftVisible.id.toLowerCase(),
+        persistedDraftVisible.slug,
+        persistedDraftVisible.category.toLowerCase(),
+      ];
+      if (!searchable.some((value) => value.includes(normalizedSearch))) {
+        return normalizedList;
+      }
+    }
+
+    return [persistedDraftVisible, ...normalizedList];
+  }, [projects, search, categoryFilter, createDraft, meta.categories]);
 
   const canDragReorderProjects = useMemo(
     () => categoryFilter !== 'all' && !search.trim() && !isLoading,
     [categoryFilter, search, isLoading]
   );
+
+  const restoreCreateDraft = () => {
+    setMode('create');
+    setSelectedId('');
+    setError('');
+    setFeedback('');
+    setIsDeleteModalOpen(false);
+    setDeleteConfirmText('');
+    setIsDeleting(false);
+    replaceForm(createDraft);
+  };
 
   const reorderProjectsInCategory = (projectIdFrom, projectIdTo) => {
     if (!projectIdFrom || !projectIdTo || projectIdFrom === projectIdTo) {
@@ -498,7 +942,11 @@ function App() {
     setDeleteConfirmText('');
     setIsDeleting(false);
     const defaultCategory = meta.categories[0] || '';
-    replaceForm(emptyForm(defaultCategory));
+    const blank = emptyForm(defaultCategory);
+    setCreateDraft(blank);
+    draftFileSignatureRef.current = '';
+    void clearCreateDraftFromDb();
+    replaceForm(blank);
   };
 
   const loadProjectForEdit = async (projectId) => {
@@ -512,6 +960,7 @@ function App() {
         common: {
           ...emptyCommon(),
           ...(data.common || {}),
+          adult: Boolean(data.common?.adult),
           compatibility: Number(data.common?.compatibility || 3),
           developingPorcentage: Number(data.common?.developingPorcentage || 0),
           icons: Array.isArray(data.common?.icons) ? data.common.icons : [],
@@ -552,6 +1001,27 @@ function App() {
           file: null,
         })),
       };
+      if (mode === 'create') {
+        const fallbackCategory = meta.categories[0] || '';
+        const parkedDraft = detachCreateDraftWithFreshPreviews(form, fallbackCategory);
+        const parkedPayload = buildDraftBinaryPayload(parkedDraft);
+        setCreateDraft((previous) => {
+          if (previous && previous !== form) {
+            revokeObjectUrls(previous);
+          }
+          return parkedDraft;
+        });
+        draftFileSignatureRef.current = parkedPayload?.filesSignature || '';
+        if (parkedPayload && isDraftMeaningful(parkedDraft)) {
+          void saveCreateDraftToDb({
+            snapshot: parkedPayload.snapshot,
+            fileEntries: parkedPayload.fileEntries,
+            replaceFiles: true,
+          }).catch((saveError) => {
+            console.warn('[draft-save-on-switch]', saveError?.message || saveError);
+          });
+        }
+      }
       setMode('edit');
       setSelectedId(data.id || projectId);
       replaceForm(nextForm);
@@ -656,19 +1126,42 @@ function App() {
     try {
       for (let index = 0; index < files.length; index += 1) {
         const file = files[index];
-        setSplitProgressText(`Splitting... ${index + 1}/${files.length} (${file.name})`);
-        try {
-          const splitResult = await splitTallImageFile(file, overlap);
-          if (splitResult.didSplit) {
-            splitSummaries.push(`${file.name} -> ${splitResult.files.length} frames`);
+        const imageCandidates = [];
+
+        if (isPdfFile(file)) {
+          setSplitProgressText(`Convertendo PDF... ${index + 1}/${files.length} (${file.name})`);
+          try {
+            const pdfPageImages = await convertPdfToPngFiles(file);
+            imageCandidates.push(...pdfPageImages);
+            splitSummaries.push(`${file.name} -> ${pdfPageImages.length} paginas`);
+          } catch (pdfError) {
+            warnings.push(
+              `Falha ao converter PDF "${file.name}". ${pdfError.message || ''}`.trim()
+            );
+            continue;
           }
-          splitResult.files.forEach((item) => {
-            nextItems.push(toNewGalleryItem(item, item.name));
-          });
-        } catch {
-          warnings.push(`Falha no split de "${file.name}". A imagem original foi mantida.`);
-          nextItems.push(toNewGalleryItem(file, file.name));
-          await waitNextFrame();
+        } else {
+          imageCandidates.push(file);
+        }
+
+        for (let candidateIndex = 0; candidateIndex < imageCandidates.length; candidateIndex += 1) {
+          const candidateFile = imageCandidates[candidateIndex];
+          setSplitProgressText(
+            `Splitting... ${index + 1}/${files.length} (${candidateFile.name})`
+          );
+          try {
+            const splitResult = await splitTallImageFile(candidateFile, overlap);
+            if (splitResult.didSplit) {
+              splitSummaries.push(`${candidateFile.name} -> ${splitResult.files.length} frames`);
+            }
+            splitResult.files.forEach((item) => {
+              nextItems.push(toNewGalleryItem(item, item.name));
+            });
+          } catch {
+            warnings.push(`Falha no split de "${candidateFile.name}". A imagem original foi mantida.`);
+            nextItems.push(toNewGalleryItem(candidateFile, candidateFile.name));
+            await waitNextFrame();
+          }
         }
       }
     } finally {
@@ -1029,6 +1522,9 @@ function App() {
     if (![1, 2, 3].includes(Number(form.common.compatibility))) {
       validationErrors.push('Compatibilidade precisa ser 1, 2 ou 3.');
     }
+    if (typeof form.common.adult !== 'boolean') {
+      validationErrors.push('Conteudo +18 deve ser verdadeiro ou falso.');
+    }
 
     if (
       Number.isNaN(Number(form.common.developingPorcentage)) ||
@@ -1060,6 +1556,7 @@ function App() {
       category: form.category,
       common: {
         ...form.common,
+        adult: Boolean(form.common.adult),
         compatibility: Number(form.common.compatibility),
         developingPorcentage: Number(form.common.developingPorcentage),
         icons: normalizedIcons,
@@ -1117,6 +1614,7 @@ function App() {
         ? '/api/projects'
         : `/api/projects/${encodeURIComponent(selectedId)}?lang=pt`;
     const method = mode === 'create' ? 'POST' : 'PUT';
+    const isCreateRequest = method === 'POST';
 
     setIsSaving(true);
     try {
@@ -1124,6 +1622,12 @@ function App() {
         method,
         body: formData,
       });
+      if (isCreateRequest) {
+        const defaultCategory = meta.categories[0] || '';
+        setCreateDraft(emptyForm(defaultCategory));
+        draftFileSignatureRef.current = '';
+        void clearCreateDraftFromDb();
+      }
       setFeedback(result.message || 'Projeto salvo.');
       await refreshProjects();
       await loadProjectForEdit(result.id || form.id);
@@ -1228,15 +1732,23 @@ function App() {
             {!isLoading && !filteredProjects.length ? <p>Nenhum projeto encontrado.</p> : null}
             {filteredProjects.map((project) => (
               <button
-                key={`${project.category}-${project.id}-${project.index}`}
+                key={`${project.isDraft ? 'draft' : 'project'}-${project.category}-${project.id}-${project.index}`}
                 type="button"
-                draggable={canDragReorderProjects && !isReorderingProjects}
-                className={`project-card ${selectedId === project.id ? 'active' : ''} ${
+                draggable={!project.isDraft && canDragReorderProjects && !isReorderingProjects}
+                className={`project-card ${
+                  project.isDraft ? (mode === 'create' ? 'active' : '') : selectedId === project.id ? 'active' : ''
+                } ${
                   draggingProjectId === project.id ? 'is-dragging' : ''
                 }`}
-                onClick={() => loadProjectForEdit(project.id)}
+                onClick={() => {
+                  if (project.isDraft) {
+                    restoreCreateDraft();
+                    return;
+                  }
+                  loadProjectForEdit(project.id);
+                }}
                 onDragStart={(event) => {
-                  if (!canDragReorderProjects || isReorderingProjects) {
+                  if (project.isDraft || !canDragReorderProjects || isReorderingProjects) {
                     event.preventDefault();
                     return;
                   }
@@ -1250,7 +1762,7 @@ function App() {
                   event.dataTransfer.dropEffect = 'move';
                 }}
                 onDrop={async (event) => {
-                  if (!canDragReorderProjects || isReorderingProjects) return;
+                  if (project.isDraft || !canDragReorderProjects || isReorderingProjects) return;
                   event.preventDefault();
                   const fromId = event.dataTransfer.getData('text/plain') || draggingProjectId;
                   const reorderedIds = reorderProjectsInCategory(fromId, project.id);
@@ -1261,11 +1773,20 @@ function App() {
                 }}
                 onDragEnd={() => setDraggingProjectId('')}
               >
-                <img src={toAssetPreviewUrl(project.image)} alt={project.title} />
+                <img
+                  src={
+                    project.image
+                      ? String(project.image).startsWith('blob:')
+                        ? project.image
+                        : toAssetPreviewUrl(project.image)
+                      : ''
+                  }
+                  alt={project.title}
+                />
                 <div className="project-card-body">
                   <strong>{project.title}</strong>
                   <small>
-                    {project.category} 
+                    {project.category} {project.isDraft ? '· rascunho' : ''}
                   </small>
                 </div>
                 <div className="project-card-edit project-drag-indicator" aria-hidden="true">
@@ -1381,6 +1902,14 @@ function App() {
                 onChange={(event) => updateCommon('developed', event.target.checked)}
               />
               Projeto concluido
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={Boolean(form.common.adult)}
+                onChange={(event) => updateCommon('adult', event.target.checked)}
+              />
+              Conteudo +18
             </label>
 
             <label>
@@ -1602,11 +2131,11 @@ function App() {
 
             <FileUploadDropzone
               id="gallery-upload"
-              accept="image/*"
+              accept="image/*,.pdf,application/pdf"
               multiple
-              title="Arraste e solte as imagens da galeria"
-              browseLabel="Escolher imagens"
-              helperText="Split automatico para imagens altas (>1080px)"
+              title="Arraste e solte imagens ou PDFs da galeria"
+              browseLabel="Escolher arquivos"
+              helperText="PDFs viram PNG por pagina e depois passam pelo split automatico (>1080px)"
               onFilesSelected={addGalleryFiles}
             />
 

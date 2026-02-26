@@ -4,6 +4,10 @@ Mini app local para criar/editar projetos do portfolio com:
 - leitura e escrita dos JSON reais (`pt`, `en`, `es`)
 - upload multiplo de imagens com ordenacao por drag and drop
 - split automatico de imagens altas em frames 1920x1080 (overlap configuravel)
+- suporte a PDF na galeria (converte cada pagina para PNG e aplica split quando necessario)
+- carregamento dinamico do motor de PDF (so quando o usuario envia `.pdf`)
+- autosave de rascunho de criacao (rollback de formulario em refresh/fechamento)
+- card de rascunho "em desenvolvimento" na lista de projetos para retomar edicao
 - conversao/otimizacao de novos uploads para WebP (thumb + galeria)
 - validacao de campos obrigatorios e unicidade de id
 - descricao com editor rich text (toolbar + modo HTML)
@@ -59,6 +63,7 @@ App web: `http://localhost:5173`
 
 1. Abra a tela e use a coluna esquerda para buscar/filtrar projetos existentes.
    - para reordenar cards, selecione uma categoria especifica (sem busca) e arraste os projetos.
+   - quando houver rascunho de criacao, ele aparece como card "rascunho" na lista.
 2. Clique em um card para editar ou em **Novo Projeto** para criar.
 3. Preencha todos os campos:
    - categoria
@@ -69,8 +74,10 @@ App web: `http://localhost:5173`
 4. Na thumbnail, escolha o modo:
    - **Thumb por imagem**: upload normal (pipeline otimiza para tamanho final pequeno).
    - **Logo + Cor**: envie uma logo, escolha cor e padding; o backend gera a thumb final automaticamente no save.
-5. Faca upload das imagens da galeria.
+5. Faca upload das imagens da galeria (JPG/PNG/WEBP ou PDF).
    - imagens altas (>1080px) sao divididas automaticamente em frames 1920x1080 no front.
+   - PDFs sao convertidos em PNG por pagina antes do split.
+   - o parser de PDF e carregado sob demanda apenas quando um PDF e enviado.
    - o split nao converte para webp; a conversao final ocorre somente ao salvar no backend.
 6. Reordene as imagens da galeria por drag and drop.
 7. Clique em **Traduzir com IA** para preencher EN/ES a partir do PT.
@@ -78,6 +85,15 @@ App web: `http://localhost:5173`
 8. Edite descricao no rich text (atalhos: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
 9. Em modo edicao, use **Deletar** para remover projeto (digite `Deletar` para confirmar).
 10. Clique em **Criar projeto** ou **Salvar edicao**.
+
+## 3.1) Rascunho e rollback de formulario
+
+- Em modo **Criar projeto**, o app salva automaticamente um rascunho local do formulario.
+- A persistencia usa **IndexedDB** (snapshot + arquivos binarios), nao apenas texto.
+- Se recarregar a pagina ou fechar/abrir o navegador, o rascunho e restaurado.
+- O rascunho aparece nos `project-cards` como item em desenvolvimento e pode ser reaberto a qualquer momento.
+- O botao **Novo projeto** limpa o rascunho atual e inicia um rascunho novo (reset completo).
+- Uploads locais nao salvos no backend (thumb/logo/galeria) tambem sao restaurados quando possivel.
 
 ## 4) Endpoints da API
 

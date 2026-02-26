@@ -56,6 +56,7 @@ const PROJECT_FIELD_ORDER = [
   'linkedinUrlLink',
   'githubUrlLink',
   'developed',
+  'adult',
   'developingPorcentage',
   'icons',
   'compatibility',
@@ -241,6 +242,7 @@ function pickCommonFields(project) {
     linkedinUrlLink: project.linkedinUrlLink,
     githubUrlLink: project.githubUrlLink,
     developed: project.developed,
+    adult: Boolean(project.adult),
     developingPorcentage: project.developingPorcentage,
     compatibility: project.compatibility,
     icons: Array.isArray(project.icons) ? project.icons : [],
@@ -276,6 +278,7 @@ function buildProjectObject(existingProject, projectId, localeInput, commonInput
     linkedinUrlLink: commonInput.linkedinUrlLink.trim(),
     githubUrlLink: commonInput.githubUrlLink.trim(),
     developed: commonInput.developed,
+    adult: Boolean(commonInput.adult),
     developingPorcentage: commonInput.developingPorcentage,
     icons: commonInput.icons.map((icon) => ({
       class: icon.class.trim(),
@@ -634,6 +637,11 @@ function validatePayloadShape(payload) {
   }
   if (typeof common.developed !== 'boolean') {
     errors.push('Campo "developed" deve ser booleano.');
+  }
+  if (common.adult === undefined) {
+    common.adult = false;
+  } else if (typeof common.adult !== 'boolean') {
+    errors.push('Campo "adult" deve ser booleano.');
   }
   if (
     typeof common.developingPorcentage !== 'number' ||
@@ -1278,7 +1286,7 @@ function buildTranslatePrompt(requestPayload) {
     '- Preserve exatamente a estrutura HTML de descriptionHtml: mesmas tags, mesma ordem e mesmos atributos.',
     '- Traduza apenas texto visivel dentro do HTML.',
     '- Nao altere links, URLs, src, href, caminhos de arquivo.',
-    '- Nao traduza nomes de tecnologias/stacks: HTML, CSS, JavaScript, TypeScript, React, Next.js, Shopify, Node, Express, MongoDB, PostgreSQL, MySQL, Tailwind, Vite, Git, API, GraphQL.',
+    '- Nao traduza nomes de tecnologias/stacks: HTML, CSS, JavaScript, TypeScript, React, Next.js, Shopify, Node, Express, MongoDB, PostgreSQL, MySQL, Tailwind, Vite, Git, API, GraphQL, GREATPAGES.',
     '- Nao traduza nomes proprios, marcas e produtos.',
     '- Nao adicione explicacoes fora do JSON.',
     'Formato EXATO da resposta:',
@@ -1435,6 +1443,7 @@ app.get(
           initialDate: project.initialDate,
           endDate: project.endDate,
           developed: project.developed,
+          adult: Boolean(project.adult),
           compatibility: project.compatibility,
           icons: Array.isArray(project.icons) ? project.icons : [],
         });

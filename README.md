@@ -16,7 +16,7 @@ Ele segue a mesma identidade do portfólio (laranja, amarelo e vermelho-alaranja
 Widescreen) e confere cada texto com **as mesmas regras do build do site**: o que o uploader salva, o site publica.
 
 ### Veja a demonstração 👇
-[![Demonstração](https://img.shields.io/badge/Abrir%20demonstração-FF9D2E?style=for-the-badge&logo=google-chrome&logoColor=white)](https://portfolio-uploader-gules.vercel.app)
+[![Demonstração](https://img.shields.io/badge/Abrir%20demonstração-FF9D2E?style=for-the-badge&logo=google-chrome&logoColor=white)](https://uploader.lorenzodacunha.com.br)
 
 > 💡 A demonstração usa projetos **fictícios** e guarda tudo só no seu navegador: dá para criar, editar, enviar
 > imagens e excluir à vontade. O botão "Restaurar demo" traz os exemplos de volta.

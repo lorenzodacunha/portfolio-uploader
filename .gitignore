@@ -1,0 +1,18 @@
+# dependencies and build output
+node_modules/
+dist/
+
+# environment: real values stay on each machine (see .env.example)
+.env
+.env.*
+!.env.example
+
+# Vercel CLI
+.vercel/
+
+# logs and editor files
+*.log
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea

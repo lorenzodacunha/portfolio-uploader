@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 
-// The case write-up accepts only the tags of the site's content standard (README, "Padrão das descrições"):
+// The case write-up accepts only the tags of the site's content standard (site docs/desenvolvimento.md, "Padrão das descrições"):
 // p, h2, ul, ol, li, strong and em, with no attributes. The editor wraps list items in <p>; the site does not.
 const NO_BREAK_SPACE = new RegExp(`&nbsp;|${String.fromCharCode(160)}`, 'g');
 

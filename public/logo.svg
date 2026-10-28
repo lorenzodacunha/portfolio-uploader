@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Camada_1" data-name="Camada 1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 291.99 118.56">
+  <defs>
+<linearGradient id="Nova_amostra_de_gradiente_3" data-name="Nova amostra de gradiente 3" x1="0" y1="59.28" x2="292.01" y2="59.28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd22e"/>
+      <stop offset=".49" stop-color="#ff9b2e"/>
+      <stop offset="1" stop-color="#ff692e"/>
+    </linearGradient>
+  </defs>
+  <polygon points="154.16 97.47 291.99 16.27 291.99 0 101.69 0 101.69 21.09 237.69 21.09 111.19 97.47 27.73 97.47 27.73 0 0 0 0 118.56 99.7 118.56 151.6 118.56 292.01 118.56 292.01 97.47 154.16 97.47" style="fill: url(#Nova_amostra_de_gradiente_3)"/>
+</svg>

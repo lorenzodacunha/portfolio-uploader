@@ -6,6 +6,7 @@ import {
   faFloppyDisk,
   faPlus,
   faRotate,
+  faRotateLeft,
   faTrash,
   faTriangleExclamation,
   faXmark,
@@ -15,14 +16,14 @@ import IconButton from './components/IconButton';
 import ProjectList from './components/ProjectList';
 import ProjectForm from './components/ProjectForm';
 import { sanitizeRichTextHtml } from './components/richTextSanitize';
-import { API_BASE, apiRequest, imageUrl, jsonRequest } from './lib/api';
+import { apiFetch, apiRequest, DEMO, jsonRequest, resetDemo } from './lib/api';
 import { buildDraftPayload, hydrateDraft, isDraftMeaningful } from './lib/draft';
 import { createId, emptyForm, formFromProject, LOCALES, revokePreviews, toPayload, toSlug } from './lib/form';
 import { convertPdfToPngFiles, DEFAULT_SPLIT_OVERLAP, isPdfFile, splitTallImageFile, waitNextFrame } from './lib/media';
 import { clearCreateDraftFromDb, loadCreateDraftFromDb, saveCreateDraftToDb } from './lib/createDraftIndexedDb';
 
-const SITE_URL = import.meta.env.VITE_SITE_URL || 'http://localhost:4321';
-const EMPTY_META = { partners: [], platforms: [], stacks: [], sections: {}, siteRoot: '' };
+const EMPTY_META = { partners: [], platforms: [], stacks: [], sections: {}, siteRoot: '', siteUrl: '' };
+const NO_ISSUES = { pt: [], en: [], es: [] };
 
 /** "aurora-tecidos (en): rule -> detail" -> the language it belongs to and the readable part. */
 function groupIssues(lines) {
@@ -74,9 +75,9 @@ function App() {
 
   const say = (tone, message, list = []) => setNotice({ tone, message, list });
 
-  const replaceForm = (next) =>
+  const replaceForm = (next, keep = draft) =>
     setForm((previous) => {
-      if (previous !== draft) revokePreviews(previous);
+      if (previous !== keep) revokePreviews(previous);
       return next;
     });
 
@@ -86,7 +87,6 @@ function App() {
   };
 
   const loadAll = async () => {
-    setIsLoading(true);
     draftReady.current = false;
     try {
       const [metaResponse] = await Promise.all([apiRequest('/api/meta'), refreshProjects()]);
@@ -102,7 +102,7 @@ function App() {
       setSavedPayload('');
       if (restored.missingFiles) say('warn', `Rascunho restaurado sem ${restored.missingFiles} imagem(ns) que o navegador não guardou.`);
     } catch (error) {
-      say('error', `${error.message} A API está rodando em ${API_BASE}?`);
+      say('error', DEMO ? error.message : `${error.message} O uploader está rodando (npm run dev)?`);
     } finally {
       draftReady.current = true;
       setIsLoading(false);
@@ -110,6 +110,8 @@ function App() {
   };
 
   useEffect(() => {
+    // First load from the API: every state update in loadAll happens after an await.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -118,12 +120,10 @@ function App() {
   useEffect(() => {
     if (!draftReady.current || mode !== 'create') return undefined;
     if (!isDraftMeaningful(form)) {
-      setDraft(null);
       draftSignature.current = '';
       void clearCreateDraftFromDb();
       return undefined;
     }
-    setDraft(form);
     const timer = setTimeout(() => {
       const payload = buildDraftPayload(form);
       const filesChanged = payload.filesSignature !== draftSignature.current;
@@ -141,14 +141,11 @@ function App() {
     () => JSON.stringify({ id: form.id, texts: form.texts }),
     [form.id, form.texts]
   );
+  const hasText = LOCALES.some((locale) => form.texts[locale].description || form.texts[locale].summary);
   useEffect(() => {
-    const hasText = LOCALES.some((locale) => form.texts[locale].description || form.texts[locale].summary);
-    if (!hasText) {
-      setIssues({ pt: [], en: [], es: [] });
-      return undefined;
-    }
-    setChecking(true);
+    if (!hasText) return undefined;
     const timer = setTimeout(() => {
+      setChecking(true);
       jsonRequest('/api/check', { payload: { ...toPayload(form), stack: form.stack } })
         .then((result) => setIssues(groupIssues(result.errors || [])))
         .catch(() => {})
@@ -163,7 +160,10 @@ function App() {
   }, [consoleLogs]);
 
   const isDirty = mode === 'edit' && savedPayload && JSON.stringify(toPayload(form)) !== savedPayload;
-  const issueCount = issues.pt.length + issues.en.length + issues.es.length;
+  const shownIssues = hasText ? issues : NO_ISSUES;
+  const issueCount = shownIssues.pt.length + shownIssues.en.length + shownIssues.es.length;
+  // While creating, the form itself is the draft; while editing, the draft parked when the editing started.
+  const currentDraft = mode === 'create' ? (isDraftMeaningful(form) ? form : null) : draft;
 
   const confirmLeave = () => !isDirty || window.confirm('Há alterações não salvas neste projeto. Descartar?');
 
@@ -173,7 +173,7 @@ function App() {
     setSelectedId('');
     setMeasurement(null);
     setNotice(null);
-    replaceForm(draft || emptyForm());
+    replaceForm(currentDraft || emptyForm());
   };
 
   const discardDraft = () => {
@@ -190,10 +190,12 @@ function App() {
     try {
       const data = await apiRequest(`/api/projects/${encodeURIComponent(id)}`);
       const next = formFromProject(data);
+      const parked = currentDraft;
+      setDraft(parked);
       setMode('edit');
       setSelectedId(id);
       setMeasurement(data.measurement);
-      replaceForm(next);
+      replaceForm(next, parked);
       setSavedPayload(JSON.stringify(toPayload(next)));
       document.querySelector('.editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (error) {
@@ -300,7 +302,7 @@ function App() {
     openConsole();
     log('Pedindo a tradução ao Ollama…');
     try {
-      const response = await fetch(`${API_BASE}/api/translate/stream`, {
+      const response = await apiFetch('/api/translate/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: { summary: pt.summary, descriptionHtml: description, role: form.partner ? pt.role : '' } }),
@@ -411,7 +413,7 @@ function App() {
       setMode('create');
       setSelectedId('');
       setMeasurement(null);
-      replaceForm(draft || emptyForm());
+      replaceForm(currentDraft || emptyForm());
       say('success', `${result.message} ${result.removedImages} imagem(ns) apagada(s).`);
     } catch (error) {
       deleteRef.current?.close();
@@ -421,9 +423,23 @@ function App() {
     }
   };
 
-  const draftCard = draft
-    ? { title: draft.title, cover: draft.gallery[0]?.preview || '' }
+  const draftCard = currentDraft
+    ? { title: currentDraft.title, cover: currentDraft.gallery[0]?.preview || '' }
     : null;
+
+  const reload = () => {
+    if (!confirmLeave()) return;
+    setIsLoading(true);
+    loadAll();
+  };
+
+  const restoreDemo = async () => {
+    if (!window.confirm('Voltar aos projetos de exemplo? O que você criou ou mudou nesta demonstração será apagado.')) return;
+    setIsLoading(true);
+    await resetDemo();
+    await loadAll();
+    say('success', 'Demonstração restaurada com os projetos de exemplo.');
+  };
   const featuredCount = projects.filter((p) => p.featured).length;
   const offlineCount = projects.filter((p) => p.offline).length;
 
@@ -435,16 +451,22 @@ function App() {
       <header className="topbar">
         <div className="topbar__bar">
           <span className="topbar__brand">
-            <img src={imageUrl('/assets/brand/logo-icone.svg')} alt="" width="54" height="22" />
+            <img src="/logo.svg" alt="" width="54" height="22" />
             <span className="topbar__name">Portfolio Uploader</span>
           </span>
           <span className="topbar__site" title={meta.siteRoot}>
-            {meta.siteRoot ? `site: ${meta.siteRoot.split(/[\\/]/).slice(-2).join('/')}` : 'site não carregado'}
+            {DEMO ? 'demonstração' : meta.siteRoot ? `site: ${meta.siteRoot.split(/[\\/]/).slice(-2).join('/')}` : 'site não carregado'}
           </span>
           <div className="topbar__actions">
-            <IconButton icon={faRotate} variant="glass" onClick={() => confirmLeave() && loadAll()}>
-              Recarregar
-            </IconButton>
+            {DEMO ? (
+              <IconButton icon={faRotateLeft} variant="glass" onClick={restoreDemo}>
+                Restaurar demo
+              </IconButton>
+            ) : (
+              <IconButton icon={faRotate} variant="glass" onClick={reload}>
+                Recarregar
+              </IconButton>
+            )}
             <IconButton icon={faPlus} variant="primary" onClick={startNew}>
               Novo projeto
             </IconButton>
@@ -462,10 +484,17 @@ function App() {
           ))}
         </svg>
         <div className="lz-band__content band__content">
-          <h1 className="lz-section-title lz-section-title--on-brand type-heading">
-            <span className="lz-section-title__one">Projetos do</span>
-            <span className="lz-section-title__two">portfólio</span>
-          </h1>
+          <div>
+            <h1 className="lz-section-title lz-section-title--on-brand type-heading">
+              <span className="lz-section-title__one">Projetos do</span>
+              <span className="lz-section-title__two">portfólio</span>
+            </h1>
+            {DEMO ? (
+              <p className="band__demo">
+                <strong>Demonstração.</strong> Projetos fictícios, guardados só neste navegador. A versão real grava no site do portfólio.
+              </p>
+            ) : null}
+          </div>
           <dl className="band__stats">
             <div>
               <dt>projetos</dt>
@@ -488,7 +517,7 @@ function App() {
           projects={projects}
           draft={draftCard}
           selectedId={mode === 'edit' ? selectedId : ''}
-          isDraftActive={mode === 'create' && Boolean(draft)}
+          isDraftActive={mode === 'create' && Boolean(currentDraft)}
           isLoading={isLoading}
           onSelect={openProject}
           onSelectDraft={startNew}
@@ -506,11 +535,13 @@ function App() {
             </div>
             <div className="editor__head-actions">
               {mode === 'edit' ? (
-                <a className="icon-btn icon-btn-ghost" href={`${SITE_URL}/cases/${form.id}/`} target="_blank" rel="noreferrer">
+                meta.siteUrl ? (
+                <a className="icon-btn icon-btn-ghost" href={`${meta.siteUrl}/cases/${form.id}/`} target="_blank" rel="noreferrer">
                   <FontAwesomeIcon icon={faArrowUpRightFromSquare} className="icon-btn-glyph" />
                   <span>Ver no site</span>
                 </a>
-              ) : draft ? (
+                ) : null
+              ) : currentDraft ? (
                 <IconButton icon={faTrash} variant="ghost" onClick={discardDraft}>
                   Apagar rascunho
                 </IconButton>
@@ -540,7 +571,7 @@ function App() {
             mode={mode}
             meta={meta}
             measurement={measurement}
-            issues={issues}
+            issues={shownIssues}
             checking={checking}
             onField={onField}
             onText={onText}
@@ -602,7 +633,11 @@ function App() {
             Excluir {form.title}?
           </h2>
         </header>
-        <p>O projeto sai do site e as imagens dele são apagadas da pasta do site. Não dá para desfazer pelo uploader.</p>
+        <p>
+          {DEMO
+            ? 'O projeto sai desta demonstração. Restaurar demo traz os exemplos de volta.'
+            : 'O projeto sai do site e as imagens dele são apagadas da pasta do site. Não dá para desfazer pelo uploader.'}
+        </p>
         <label className="field">
           <span className="field__label">
             Digite <strong>Excluir</strong> para confirmar

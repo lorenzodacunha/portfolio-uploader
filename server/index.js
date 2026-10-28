@@ -1,18 +1,26 @@
 // Portfolio Uploader API: reads and writes the portfolio's own content (site/src/data/projects.json, one file with the
 // three languages as field_en and field_es) and its case images (site/public/assets/projects/<id>-<n>.webp plus the
 // -640 copy). Every save goes through the site's content standard (site/scripts/description-rules.mjs, the same rules
-// the build runs), so a project the uploader saves never breaks `npm run build`.
-const path = require('path');
-const fsPromises = require('fs/promises');
-const { pathToFileURL } = require('url');
-const express = require('express');
-const cors = require('cors');
-const multer = require('multer');
-const dotenv = require('dotenv');
-const sharp = require('sharp');
-const sanitizeHtml = require('sanitize-html');
+// the build runs), so a project the uploader saves never breaks `npm run build` of the site.
+//
+// One server for everything: the API under /api and the interface on the same port. `npm run dev` mounts Vite in
+// middleware mode (hot reload); `npm start` serves the build in dist/ (`npm run build`).
+import path from 'node:path';
+import fsPromises from 'node:fs/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import express from 'express';
+import multer from 'multer';
+import dotenv from 'dotenv';
+import sharp from 'sharp';
+import sanitizeHtml from 'sanitize-html';
+import {
+  LOCALES, SUFFIX, TONES, TYPES, assembleProject, byUse, canonicalSections, listItem, measurementSummary, normalizeFeaturedOrder,
+  placeFeatured, plainText, projectDetail, tidyDescription, validatePayload,
+} from '../shared/project.js';
 
-dotenv.config({ path: path.join(__dirname, '.env') });
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const DEV = process.argv.includes('--dev');
+dotenv.config({ path: path.join(ROOT, '.env'), quiet: true });
 
 const app = express();
 const PORT = Number(process.env.PORT || 3333);
@@ -26,7 +34,8 @@ const OLLAMA_MODEL = String(process.env.OLLAMA_MODEL || 'llama3.1:70b').trim();
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 300000);
 const OLLAMA_MAX_RETRIES = 2;
 
-const SITE_ROOT = path.resolve(__dirname, process.env.SITE_ROOT || path.join('..', '..', 'site'));
+const SITE_ROOT = path.resolve(ROOT, process.env.SITE_ROOT || path.join('..', 'site'));
+const SITE_URL = String(process.env.SITE_URL || 'http://localhost:4321').replace(/\/+$/, '');
 const FILES = {
   projects: process.env.PROJECTS_FILE || 'src/data/projects.json',
   profile: process.env.PROFILE_FILE || 'src/data/profile.json',
@@ -37,28 +46,11 @@ const FILES = {
 const PUBLIC_DIR = 'public';
 const ASSETS_DIR = (process.env.ASSETS_DIR || 'public/assets/projects').replace(/\\/g, '/');
 
-const LOCALES = ['pt', 'en', 'es'];
-const SUFFIX = { pt: '', en: '_en', es: '_es' };
-const TYPES = ['loja', 'landing'];
-const TONES = ['', 'brand', 'light', 'strong', 'dark'];
 const NO_BREAK_SPACE = new RegExp(`&nbsp;|${String.fromCharCode(160)}`, 'g');
-// Key order of a new project, the same as the projects imported from the previous site.
-const FIELD_ORDER = [
-  'id', 'legacyId', 'featured', 'order', 'title', 'platform', 'period', 'period_en', 'period_es', 'sort', 'type',
-  'tone', 'summary', 'summary_en', 'summary_es', 'description', 'description_en', 'description_es', 'stack', 'url',
-  'offline', 'partner', 'role', 'role_en', 'role_es', 'example', 'adult', 'performance', 'images',
-];
-const MONTHS = {
-  pt: ['jan.', 'fev.', 'mar.', 'abr.', 'mai.', 'jun.', 'jul.', 'ago.', 'set.', 'out.', 'nov.', 'dez.'],
-  en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
-  es: ['ene.', 'feb.', 'mar.', 'abr.', 'may.', 'jun.', 'jul.', 'ago.', 'sept.', 'oct.', 'nov.', 'dic.'],
-};
-
 let writeQueue = Promise.resolve();
 let rulesModule = null;
 let ollamaModelsCache = { loadedAt: 0, models: [] };
 
-app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
 const upload = multer({
@@ -131,59 +123,12 @@ async function getRules() {
 
 /** The standard allows p, h2, ul, ol, li, strong and em, with no attributes; the editor's markup is folded into it. */
 function normalizeDescription(rawHtml) {
-  return sanitizeHtml(String(rawHtml || '').replace(NO_BREAK_SPACE, ' '), {
+  const html = sanitizeHtml(String(rawHtml || '').replace(NO_BREAK_SPACE, ' '), {
     allowedTags: ['p', 'h2', 'ul', 'ol', 'li', 'strong', 'em'],
     allowedAttributes: {},
     transformTags: { b: 'strong', i: 'em', h1: 'h2', h3: 'h2', h4: 'h2', div: 'p' },
-  })
-    .replace(/<li>\s*<p>/g, '<li>')
-    .replace(/<\/p>\s*<\/li>/g, '</li>')
-    .replace(/<\/p>\s*<p>(?=[^<]*<\/li>)/g, ' ')
-    .replace(/<p>\s*<\/p>/g, '')
-    .replace(/>\s+</g, '><')
-    .trim();
-}
-
-function plainText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
-/** "2024-08" and "2025-01" -> the period line in each language and the sort key (yyyymm of the end). */
-function formatPeriod(start, end) {
-  const [y1, m1] = start.split('-').map(Number);
-  const [y2, m2] = end.split('-').map(Number);
-  const out = {};
-  for (const locale of LOCALES) {
-    const a = MONTHS[locale][m1 - 1];
-    const b = MONTHS[locale][m2 - 1];
-    const of = locale === 'en' ? ' ' : ' de ';
-    const to = locale === 'en' ? ' to ' : ' a ';
-    if (y1 === y2 && m1 === m2) out[locale] = `${a}${of}${y1}`;
-    else if (y1 === y2) out[locale] = `${a}${to}${b}${of}${y1}`;
-    else out[locale] = `${a}${of}${y1}${to}${b}${of}${y2}`;
-  }
-  return { period: out.pt, period_en: out.en, period_es: out.es, sort: y2 * 100 + m2 };
-}
-
-/** The Portuguese period line back to its months ("set. a dez. de 2023" -> 2023-09, 2023-12); null if unreadable. */
-function parsePeriod(period) {
-  const match = /^([a-zç]+)\.(?: de (\d{4}))?(?: a ([a-zç]+)\.)?(?: de (\d{4}))?$/.exec(String(period || '').trim());
-  if (!match) return null;
-  const month = (token) => MONTHS.pt.indexOf(`${token}.`) + 1;
-  const m1 = month(match[1]);
-  const m2 = match[3] ? month(match[3]) : m1;
-  const y2 = Number(match[4] || match[2]);
-  const y1 = Number(match[2] || match[4]);
-  if (!m1 || !m2 || !y1 || !y2) return null;
-  const pad = (n) => String(n).padStart(2, '0');
-  return { start: `${y1}-${pad(m1)}`, end: `${y2}-${pad(m2)}` };
-}
-
-function orderKeys(project) {
-  const ordered = {};
-  for (const key of FIELD_ORDER) if (key in project) ordered[key] = project[key];
-  for (const [key, value] of Object.entries(project)) if (!(key in ordered)) ordered[key] = value;
-  return ordered;
+  });
+  return tidyDescription(html);
 }
 
 function parsePayload(raw) {
@@ -193,75 +138,6 @@ function parsePayload(raw) {
   } catch {
     throw createHttpError(400, 'Payload inválido: o campo "payload" precisa ser JSON.');
   }
-}
-
-/** Field rules of the form; the content standard of the texts runs afterwards on the assembled project. */
-function validatePayload(payload, profile) {
-  const errors = [];
-  const text = (value) => typeof value === 'string' && value.trim();
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(String(payload.id || ''))) {
-    errors.push('Endereço do case (id): só letras minúsculas, números e hífen, como "aurora-tecidos".');
-  }
-  if (!text(payload.title)) errors.push('Nome do projeto é obrigatório.');
-  if (!text(payload.platform)) errors.push('Plataforma é obrigatória.');
-  if (!TYPES.includes(payload.type)) errors.push('Tipo precisa ser Loja ou Landing page.');
-  if (!TONES.includes(payload.tone ?? '')) errors.push('Fundo do card inválido.');
-  const month = /^\d{4}-(0[1-9]|1[0-2])$/;
-  if (!month.test(String(payload.start || '')) || !month.test(String(payload.end || ''))) {
-    errors.push('Período: informe o mês de início e o de fim.');
-  } else if (payload.start > payload.end) {
-    errors.push('Período: o início vem antes do fim.');
-  }
-  if (payload.url && !/^https?:\/\/\S+$/i.test(payload.url)) errors.push('Link da loja precisa começar com http:// ou https://.');
-  if (payload.offline && !payload.url) errors.push('"Loja fora do ar" precisa do link da loja (ele fica guardado, sem botão ativo).');
-  if (payload.partner && !profile.partners?.[payload.partner]) errors.push(`Parceiro "${payload.partner}" não existe em profile.json.`);
-  if (!Array.isArray(payload.stack) || !payload.stack.some((item) => text(item))) errors.push('Adicione ao menos uma tecnologia.');
-  if (!Array.isArray(payload.gallery) || payload.gallery.length === 0) errors.push('Adicione ao menos uma imagem.');
-  for (const locale of LOCALES) {
-    const texts = payload.texts?.[locale] || {};
-    if (payload.partner && !text(texts.role)) errors.push(`Minha atuação (${locale.toUpperCase()}) é obrigatória quando há parceria.`);
-  }
-  return errors;
-}
-
-/** Applies the form on top of the stored project (or a new one), keeping fields the form does not edit. */
-function assembleProject(existing, payload) {
-  const project = existing ? { ...existing } : { id: payload.id, legacyId: '', featured: false, order: null };
-  project.featured = Boolean(payload.featured);
-  project.title = plainText(payload.title);
-  project.platform = plainText(payload.platform);
-  if (/^\d{4}-\d{2}$/.test(payload.start) && /^\d{4}-\d{2}$/.test(payload.end)) Object.assign(project, formatPeriod(payload.start, payload.end));
-  project.type = payload.type;
-  project.tone = payload.tone || '';
-  // A text nobody changed keeps its stored form (spacing between tags included), so a save touches only what was edited.
-  const keep = (key, value, normalize) => (existing && normalize(existing[key]) === value ? existing[key] : value);
-  for (const locale of LOCALES) {
-    const texts = payload.texts?.[locale] || {};
-    project[`summary${SUFFIX[locale]}`] = keep(`summary${SUFFIX[locale]}`, plainText(texts.summary), plainText);
-    project[`description${SUFFIX[locale]}`] = keep(`description${SUFFIX[locale]}`, normalizeDescription(texts.description), normalizeDescription);
-  }
-  project.stack = payload.stack.map(plainText).filter(Boolean);
-  project.url = plainText(payload.url);
-  project.offline = Boolean(payload.offline && payload.url);
-  project.partner = payload.partner || '';
-  project.role = project.partner ? plainText(payload.texts?.pt?.role) : '';
-  for (const locale of ['en', 'es']) {
-    if (project.partner) project[`role${SUFFIX[locale]}`] = plainText(payload.texts?.[locale]?.role);
-    else delete project[`role${SUFFIX[locale]}`];
-  }
-  if (!('example' in project)) project.example = false;
-  project.adult = Boolean(payload.adult);
-  // The performance panel never shows for a store that is no longer online.
-  project.performance = Boolean(payload.performance) && !project.offline;
-  if (!project.images) project.images = [];
-  return existing ? project : orderKeys(project);
-}
-
-/** Featured projects form the "Cases em produção" rail in `order` (0, 1, 2...); the others have order null. */
-function normalizeFeaturedOrder(projects) {
-  const featured = projects.filter((p) => p.featured).sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
-  featured.forEach((p, index) => { p.order = index; });
-  projects.filter((p) => !p.featured).forEach((p) => { p.order = null; });
 }
 
 async function contentErrors(project) {
@@ -381,21 +257,6 @@ function assertHtmlStructurePreserved(sourceHtml, translatedHtml, targetLang) {
   if (getHtmlTagTokens(sourceHtml).join('|') !== getHtmlTagTokens(translatedHtml).join('|')) {
     throw new Error(`Estrutura HTML alterada em "${targetLang}".`);
   }
-}
-
-/** Section titles are fixed names: the translation takes the canonical name of the same section, by position. */
-async function canonicalSections(sourceHtml, translatedHtml, locale) {
-  const { SECTIONS } = await getRules();
-  const names = (key) => SECTIONS[key].map((name) => name.replace('?', ''));
-  const pt = names('description');
-  const target = names(`description${SUFFIX[locale]}`);
-  const heads = [...String(sourceHtml).matchAll(/<h2>([\s\S]*?)<\/h2>/g)].map((match) => match[1].trim());
-  let index = 0;
-  return translatedHtml.replace(/<h2>[\s\S]*?<\/h2>/g, (original) => {
-    const at = pt.indexOf(heads[index]);
-    index += 1;
-    return at >= 0 ? `<h2>${target[at]}</h2>` : original;
-  });
 }
 
 function normalizeTranslateRequest(payload) {
@@ -541,7 +402,7 @@ async function parseTranslation(raw, request) {
     if (request.content.descriptionHtml) assertHtmlStructurePreserved(request.content.descriptionHtml, descriptionHtml, locale);
     result[locale] = {
       summary: plainText(item.summary),
-      descriptionHtml: await canonicalSections(request.content.descriptionHtml, descriptionHtml, locale),
+      descriptionHtml: canonicalSections((await getRules()).SECTIONS, request.content.descriptionHtml, descriptionHtml, locale),
       role: plainText(item.role),
     };
   }
@@ -579,36 +440,6 @@ async function translateWithOllama(request, onProgress = () => {}) {
 
 // ---------- routes ----------
 
-function listItem(project, measured, issues) {
-  return {
-    id: project.id,
-    title: project.title,
-    platform: project.platform,
-    type: project.type,
-    period: project.period,
-    sort: project.sort,
-    featured: Boolean(project.featured),
-    order: project.order ?? null,
-    offline: Boolean(project.offline),
-    adult: Boolean(project.adult),
-    performance: Boolean(project.performance),
-    partner: project.partner || '',
-    example: Boolean(project.example),
-    measured: Boolean(measured[project.id]),
-    cover: project.images?.[0] ? smallSrc(project.images[0].src) : '',
-    issues,
-  };
-}
-
-function measurementSummary(run) {
-  if (!run) return null;
-  return {
-    mobile: run.mobile?.score ?? null,
-    desktop: run.desktop?.score ?? null,
-    fetchTime: run.mobile?.fetchTime || run.desktop?.fetchTime || '',
-  };
-}
-
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, siteRoot: SITE_ROOT });
 });
@@ -617,16 +448,12 @@ app.get(
   '/api/meta',
   asyncHandler(async (req, res) => {
     const [projects, profile, rules] = await Promise.all([readJson(FILES.projects), readJson(FILES.profile), getRules()]);
-    const count = (list) => {
-      const counts = new Map();
-      list.forEach((item) => counts.set(item, (counts.get(item) || 0) + 1));
-      return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([item]) => item);
-    };
     res.json({
       siteRoot: SITE_ROOT,
+      siteUrl: SITE_URL,
       partners: Object.entries(profile.partners || {}).map(([key, partner]) => ({ key, name: partner.name, logo: `/${partner.logo}` })),
-      platforms: count(projects.map((p) => p.platform)),
-      stacks: count(projects.flatMap((p) => p.stack || [])),
+      platforms: byUse(projects.map((p) => p.platform)),
+      stacks: byUse(projects.flatMap((p) => p.stack || [])),
       sections: Object.fromEntries(LOCALES.map((locale) => [locale, rules.SECTIONS[`description${SUFFIX[locale]}`]])),
       types: TYPES,
       tones: TONES,
@@ -638,7 +465,13 @@ app.get(
   '/api/projects',
   asyncHandler(async (req, res) => {
     const [projects, measured, { checkProject }] = await Promise.all([readJson(FILES.projects), readJson(FILES.performance, {}), getRules()]);
-    res.json({ projects: projects.map((p) => listItem(p, measured, checkProject(p).length)) });
+    res.json({
+      projects: projects.map((p) => listItem(p, {
+        measured: measured[p.id],
+        issues: checkProject(p).length,
+        cover: p.images?.[0] ? smallSrc(p.images[0].src) : '',
+      })),
+    });
   })
 );
 
@@ -648,32 +481,7 @@ app.get(
     const [projects, measured] = await Promise.all([readJson(FILES.projects), readJson(FILES.performance, {})]);
     const project = projects.find((p) => p.id === req.params.id);
     if (!project) throw createHttpError(404, `Projeto "${req.params.id}" não encontrado.`);
-    const months = parsePeriod(project.period) || { start: '', end: '' };
-    res.json({
-      id: project.id,
-      title: project.title,
-      platform: project.platform,
-      type: project.type,
-      tone: project.tone || '',
-      start: months.start,
-      end: months.end,
-      url: project.url || '',
-      offline: Boolean(project.offline),
-      featured: Boolean(project.featured),
-      order: project.order ?? null,
-      adult: Boolean(project.adult),
-      performance: Boolean(project.performance),
-      partner: project.partner || '',
-      example: Boolean(project.example),
-      stack: project.stack || [],
-      texts: Object.fromEntries(LOCALES.map((locale) => [locale, {
-        summary: project[`summary${SUFFIX[locale]}`] || '',
-        description: project[`description${SUFFIX[locale]}`] || '',
-        role: project[`role${SUFFIX[locale]}`] || '',
-      }])),
-      images: project.images || [],
-      measurement: measurementSummary(measured[project.id]),
-    });
+    res.json(projectDetail(project, { measurement: measurementSummary(measured[project.id]) }));
   })
 );
 
@@ -697,7 +505,7 @@ app.post(
     const payload = parsePayload(req.body?.payload);
     const projects = await readJson(FILES.projects);
     const existing = projects.find((p) => p.id === payload.id) || null;
-    const project = assembleProject(existing, { ...payload, stack: payload.stack || [] });
+    const project = assembleProject(existing, payload, normalizeDescription);
     res.json({ errors: await contentErrors(project) });
   })
 );
@@ -749,7 +557,7 @@ async function saveProject(req, res, mode) {
 
   const result = await withWriteLock(async () => {
     const [projects, profile] = await Promise.all([readJson(FILES.projects), readJson(FILES.profile)]);
-    const fieldErrors = validatePayload(payload, profile);
+    const fieldErrors = validatePayload(payload, profile.partners);
     if (fieldErrors.length) throw createHttpError(400, 'Confira os campos do formulário.', fieldErrors);
 
     const index = projects.findIndex((p) => p.id === payload.id);
@@ -758,19 +566,15 @@ async function saveProject(req, res, mode) {
     const existing = index >= 0 ? projects[index] : null;
 
     // The texts are checked before any image is written, so a refused save leaves no files behind.
-    const draft = assembleProject(existing, payload);
+    const draft = assembleProject(existing, payload, normalizeDescription);
     const errors = await contentErrors({ ...draft, images: [] });
     if (errors.length) throw createHttpError(422, 'Os textos não seguem o padrão das descrições.', errors);
 
     const previousImages = existing?.images || [];
     draft.images = await materializeGallery(payload.id, payload.gallery, uploads, previousImages);
-    if (mode === 'create') {
-      if (draft.featured) draft.order = projects.filter((p) => p.featured).length;
-      projects.push(draft);
-    } else {
-      if (draft.featured && !existing.featured) draft.order = projects.filter((p) => p.featured).length;
-      projects[index] = draft;
-    }
+    placeFeatured(projects, draft, Boolean(existing?.featured));
+    if (mode === 'create') projects.push(draft);
+    else projects[index] = draft;
     normalizeFeaturedOrder(projects);
     await writeJson(FILES.projects, projects);
 
@@ -824,15 +628,33 @@ app.use((error, req, res, next) => {
   res.status(status).json({ message, status, errors: error.errors || [] });
 });
 
+app.use('/api', (req, res) => res.status(404).json({ message: 'Rota da API inexistente.', status: 404, errors: [] }));
+
+/** The interface on the same port as the API: Vite in development, the build in dist/ otherwise. */
+async function mountInterface() {
+  if (DEV) {
+    const { createServer } = await import('vite');
+    const vite = await createServer({ root: ROOT, server: { middlewareMode: true }, appType: 'spa' });
+    app.use(vite.middlewares);
+    return;
+  }
+  const dist = path.join(ROOT, 'dist');
+  if (!(await fileExists(path.join(dist, 'index.html')))) {
+    throw new Error('Interface não compilada: rode npm run build antes de npm start (ou use npm run dev).');
+  }
+  app.use(express.static(dist));
+}
+
 async function bootstrap() {
   for (const file of [FILES.projects, FILES.profile, FILES.rules]) {
     if (!(await fileExists(resolveSitePath(file)))) throw new Error(`Arquivo do site não encontrado: ${resolveSitePath(file)}. Confira SITE_ROOT no .env.`);
   }
   await getRules();
+  await mountInterface();
   app.listen(PORT, () => {
-    console.log(`[uploader-api] http://localhost:${PORT}`);
-    console.log('[uploader-api] site:', SITE_ROOT);
-    console.log('[uploader-api] ollama:', { url: OLLAMA_URL, model: OLLAMA_MODEL });
+    console.log(`[uploader] http://localhost:${PORT}${DEV ? ' (desenvolvimento)' : ''}`);
+    console.log('[uploader] site:', SITE_ROOT);
+    console.log('[uploader] ollama:', { url: OLLAMA_URL, model: OLLAMA_MODEL });
   });
 }
 

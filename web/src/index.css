@@ -1,4 +1,26 @@
-* {
+/* Base of the uploader: the portfolio's design system (LZ tokens and components, copied from
+   site/src/styles/design) under a small reset. App.css builds the screens on these tokens. */
+@import './styles/lz-tokens.css';
+@import './styles/lz-components.css';
+
+:root {
+  --font-title: "widescreen-mixed", "Syncopate", sans-serif;
+  --font-body: "Poppins", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  --color-surface-app: #f2f2f3;
+  --color-surface-soft: #f8f8f9;
+  --color-tint-brand: rgba(255, 157, 46, 0.12);
+  --color-tint-light: rgba(255, 210, 46, 0.22);
+  --color-tint-strong: rgba(255, 105, 46, 0.14);
+  --radius-field: 12px;
+  --field-height: 44px;
+  --topbar-offset: 88px;
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -10,27 +32,40 @@ body,
 }
 
 body {
-  --bg-main: #2f2f2f;
-  --panel: #252525;
-  --panel-alt: #202020;
-  --input: #3a3a3a;
-  --line: #e7d8bc;
-  --text: #ffffff;
-  --text-button: #202020;
-  --muted: #FFC37D;
-  --muted-alt: #6e6e6e;
-  --accent: #FFA030;
-  --accent-strong: #ff8a00;
-  --danger: #ce2121;
-  --danger-bg: #ffe7df;
-  --primary-color: #FFA030;
-  --secondary-color: #FFC37D;
-  --really-black-orange: #ff951a;
-  --extreme-black-orange: #ff8a00;
-  --gap: 16px;
-  --border-radius: 20px;
-  --padding: 16px;
-  --margin: 16px;
-  font-family: "Inter", sans-serif;
-  letter-spacing: .5px;
+  background: var(--color-surface-app);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: 3px solid var(--neutral-dark);
+  outline-offset: 2px;
 }

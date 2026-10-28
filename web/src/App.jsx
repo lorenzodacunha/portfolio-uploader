@@ -1,2314 +1,623 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
+  faArrowUpRightFromSquare,
+  faCircleCheck,
   faFloppyDisk,
-  faGripVertical,
   faPlus,
   faRotate,
-  faTerminal,
   faTrash,
-  faWandMagicSparkles,
+  faTriangleExclamation,
+  faXmark,
 } from '@fortawesome/free-solid-svg-icons';
 import './App.css';
-import FileUploadDropzone from './components/FileUploadDropzone';
 import IconButton from './components/IconButton';
-import RichTextEditor from './components/RichTextEditor';
+import ProjectList from './components/ProjectList';
+import ProjectForm from './components/ProjectForm';
 import { sanitizeRichTextHtml } from './components/richTextSanitize';
-import {
-  clearCreateDraftFromDb,
-  loadCreateDraftFromDb,
-  saveCreateDraftToDb,
-} from './lib/createDraftIndexedDb';
+import { API_BASE, apiRequest, imageUrl, jsonRequest } from './lib/api';
+import { buildDraftPayload, hydrateDraft, isDraftMeaningful } from './lib/draft';
+import { createId, emptyForm, formFromProject, LOCALES, revokePreviews, toPayload, toSlug } from './lib/form';
+import { convertPdfToPngFiles, DEFAULT_SPLIT_OVERLAP, isPdfFile, splitTallImageFile, waitNextFrame } from './lib/media';
+import { clearCreateDraftFromDb, loadCreateDraftFromDb, saveCreateDraftToDb } from './lib/createDraftIndexedDb';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3333';
-const DEFAULT_LOCALES = ['pt', 'en', 'es'];
-const SPLIT_FRAME_WIDTH = 1920;
-const SPLIT_FRAME_HEIGHT = 1080;
-const DEFAULT_SPLIT_OVERLAP = 120;
-const THUMB_PREVIEW_WIDTH = 248;
-const THUMB_PREVIEW_HEIGHT = Math.round(THUMB_PREVIEW_WIDTH / (195 / 113));
-const DEFAULT_LOGO_PADDING_PERCENT = 15;
-const MAX_PDF_PAGES = 80;
+const SITE_URL = import.meta.env.VITE_SITE_URL || 'http://localhost:4321';
+const EMPTY_META = { partners: [], platforms: [], stacks: [], sections: {}, siteRoot: '' };
 
-const createId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-const createProjectPersistentId = () =>
-  `prj_${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
-
-const waitNextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-let pdfRuntimePromise = null;
-
-async function getPdfRuntime() {
-  if (!pdfRuntimePromise) {
-    pdfRuntimePromise = (async () => {
-      const pdfModule = await import('pdfjs-dist/legacy/build/pdf');
-      const workerModule = await import('pdfjs-dist/build/pdf.worker.min.mjs?url');
-      pdfModule.GlobalWorkerOptions.workerSrc = workerModule.default;
-      return pdfModule;
-    })();
+/** "aurora-tecidos (en): rule -> detail" -> the language it belongs to and the readable part. */
+function groupIssues(lines) {
+  const grouped = { pt: [], en: [], es: [] };
+  for (const line of lines) {
+    const match = /^.*? \(([a-z_]+)\): ([\s\S]*)$/.exec(line);
+    if (!match) continue;
+    const key = match[1];
+    const locale = key.endsWith('_en') || key === 'en' ? 'en' : key.endsWith('_es') || key === 'es' ? 'es' : 'pt';
+    grouped[locale].push(key.startsWith('summary') ? `Resumo: ${match[2]}` : match[2]);
   }
-  return pdfRuntimePromise;
+  return grouped;
 }
 
-function readImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const imageUrl = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(imageUrl);
-      resolve(image);
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(imageUrl);
-      reject(new Error(`Falha ao carregar imagem "${file.name}".`));
-    };
-    image.src = imageUrl;
-  });
-}
-
-function canvasToPngFile(canvas, fileName) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error('Falha ao gerar frame da imagem.'));
-        return;
-      }
-      resolve(
-        new File([blob], fileName, {
-          type: 'image/png',
-          lastModified: Date.now(),
-        })
-      );
-    }, 'image/png');
-  });
-}
-
-function isPdfFile(file) {
-  const fileName = String(file?.name || '').toLowerCase();
-  return file?.type === 'application/pdf' || fileName.endsWith('.pdf');
-}
-
-async function convertPdfToPngFiles(file) {
-  const { getDocument } = await getPdfRuntime();
-  const fileBaseName = String(file.name || 'documento').replace(/\.[^/.]+$/, '');
-  const bytes = await file.arrayBuffer();
-  const pdf = await getDocument({ data: bytes }).promise;
-
-  if (pdf.numPages > MAX_PDF_PAGES) {
-    throw new Error(`PDF com ${pdf.numPages} paginas excede o limite de ${MAX_PDF_PAGES}.`);
-  }
-
-  const pageFiles = [];
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const renderScale = SPLIT_FRAME_WIDTH / Math.max(1, baseViewport.width);
-    const viewport = page.getViewport({ scale: renderScale });
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(viewport.width));
-    canvas.height = Math.max(1, Math.round(viewport.height));
-    const context = canvas.getContext('2d');
-
-    if (!context) {
-      throw new Error('Falha ao inicializar canvas para conversao de PDF.');
-    }
-
-    await page.render({
-      canvasContext: context,
-      viewport,
-    }).promise;
-
-    const pageSuffix = String(pageNumber).padStart(3, '0');
-    const pageFile = await canvasToPngFile(canvas, `${fileBaseName}__page-${pageSuffix}.png`);
-    pageFiles.push(pageFile);
-    await waitNextFrame();
-  }
-
-  return pageFiles;
-}
-
-async function splitTallImageFile(file, overlapPx) {
-  const image = await readImageFromFile(file);
-  const shouldSplit = image.naturalHeight > SPLIT_FRAME_HEIGHT;
-  if (!shouldSplit) {
-    return {
-      didSplit: false,
-      files: [file],
-    };
-  }
-
-  const scale = SPLIT_FRAME_WIDTH / image.naturalWidth;
-  const scaledHeight = Math.max(1, Math.round(image.naturalHeight * scale));
-  if (scaledHeight <= SPLIT_FRAME_HEIGHT) {
-    return {
-      didSplit: false,
-      files: [file],
-    };
-  }
-
-  const overlap = Number.isFinite(overlapPx)
-    ? Math.max(0, Math.min(SPLIT_FRAME_HEIGHT - 1, Math.round(overlapPx)))
-    : DEFAULT_SPLIT_OVERLAP;
-  const step = Math.max(1, SPLIT_FRAME_HEIGHT - overlap);
-
-  const frameTops = [];
-  for (let top = 0; top + SPLIT_FRAME_HEIGHT < scaledHeight; top += step) {
-    frameTops.push(top);
-  }
-  const anchoredLastTop = Math.max(0, scaledHeight - SPLIT_FRAME_HEIGHT);
-  if (frameTops.length === 0 || frameTops[frameTops.length - 1] !== anchoredLastTop) {
-    frameTops.push(anchoredLastTop);
-  }
-
-  const sourceSliceHeight = SPLIT_FRAME_HEIGHT / scale;
-  const frameFiles = [];
-  const fileBaseName = file.name.replace(/\.[^/.]+$/, '');
-
-  for (let index = 0; index < frameTops.length; index += 1) {
-    const sourceY = frameTops[index] / scale;
-    const canvas = document.createElement('canvas');
-    canvas.width = SPLIT_FRAME_WIDTH;
-    canvas.height = SPLIT_FRAME_HEIGHT;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      throw new Error('Falha ao inicializar canvas para split da imagem.');
-    }
-
-    ctx.drawImage(
-      image,
-      0,
-      sourceY,
-      image.naturalWidth,
-      sourceSliceHeight,
-      0,
-      0,
-      SPLIT_FRAME_WIDTH,
-      SPLIT_FRAME_HEIGHT
-    );
-
-    const paddedNumber = String(index + 1).padStart(3, '0');
-    const frameName = `${fileBaseName}__${paddedNumber}.png`;
-    // Mantem o app responsivo durante split de imagens muito altas.
-    await waitNextFrame();
-    const frameFile = await canvasToPngFile(canvas, frameName);
-    frameFiles.push(frameFile);
-  }
-
-  return {
-    didSplit: true,
-    files: frameFiles,
-  };
-}
-
-async function generateLogoThumbnailPreviewFile(logoFile, backgroundColor, paddingPercent) {
-  const image = await readImageFromFile(logoFile);
-  const canvas = document.createElement('canvas');
-  canvas.width = THUMB_PREVIEW_WIDTH;
-  canvas.height = THUMB_PREVIEW_HEIGHT;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Falha ao gerar preview da thumb.');
-  }
-
-  ctx.fillStyle = backgroundColor || '#1f1f1f';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  const minDimension = Math.min(canvas.width, canvas.height);
-  const safePadding = Math.max(0, Math.min(40, Number(paddingPercent) || DEFAULT_LOGO_PADDING_PERCENT));
-  const paddingPx = Math.round((minDimension * safePadding) / 100);
-  const maxLogoWidth = Math.max(1, canvas.width - paddingPx * 2);
-  const maxLogoHeight = Math.max(1, canvas.height - paddingPx * 2);
-
-  const logoScale = Math.min(maxLogoWidth / image.naturalWidth, maxLogoHeight / image.naturalHeight, 1);
-  const drawWidth = Math.max(1, Math.round(image.naturalWidth * logoScale));
-  const drawHeight = Math.max(1, Math.round(image.naturalHeight * logoScale));
-  const offsetX = Math.round((canvas.width - drawWidth) / 2);
-  const offsetY = Math.round((canvas.height - drawHeight) / 2);
-
-  ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight);
-  return canvasToPngFile(canvas, 'thumb-logo-preview.png');
-}
-
-const emptyLocales = () => ({
-  pt: { title: '', description: '' },
-  en: { title: '', description: '' },
-  es: { title: '', description: '' },
-});
-
-const emptyCommon = () => ({
-  initialDate: '',
-  endDate: '',
-  projectUrlLink: '',
-  linkedinUrlLink: '',
-  githubUrlLink: '',
-  developed: true,
-  adult: false,
-  featured: false,
-  developingPorcentage: 100,
-  compatibility: 3,
-  icons: [],
-});
-
-const emptyForm = (category = '') => ({
-  id: createProjectPersistentId(),
-  category,
-  common: emptyCommon(),
-  locales: emptyLocales(),
-  thumbnail: {
-    mode: 'image',
-    kind: 'none',
-    path: '',
-    preview: '',
-    id: '',
-    file: null,
-    logo: { id: '', file: null, name: '' },
-    backgroundColor: '#1f1f1f',
-    paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
-  },
-  gallery: [],
-});
-
-function isDraftMeaningful(form) {
-  if (!form) return false;
-  if (String(form.category || '').trim()) return true;
-
-  for (const locale of DEFAULT_LOCALES) {
-    const localeData = form.locales?.[locale];
-    if (!localeData) continue;
-    if (String(localeData.title || '').trim()) return true;
-    if (String(localeData.description || '').trim()) return true;
-  }
-
-  if (String(form.common?.initialDate || '').trim()) return true;
-  if (String(form.common?.endDate || '').trim()) return true;
-  if (String(form.common?.projectUrlLink || '').trim()) return true;
-  if (String(form.common?.linkedinUrlLink || '').trim()) return true;
-  if (String(form.common?.githubUrlLink || '').trim()) return true;
-  if (Array.isArray(form.common?.icons) && form.common.icons.length > 0) return true;
-
-  if (form.thumbnail?.kind && form.thumbnail.kind !== 'none') return true;
-  if (Array.isArray(form.gallery) && form.gallery.length > 0) return true;
-
-  return false;
-}
-
-function buildDraftBinaryPayload(form) {
-  if (!form) return null;
-
-  const fileEntries = [];
-  const fileSignatureTokens = [];
-  const nextId = String(form.id || createProjectPersistentId());
-
-  const snapshot = {
-    version: 2,
-    id: nextId,
-    category: String(form.category || ''),
-    common: {
-      ...emptyCommon(),
-      ...(form.common || {}),
-      icons: Array.isArray(form.common?.icons) ? form.common.icons : [],
-    },
-    locales: {
-      ...emptyLocales(),
-      ...(form.locales || {}),
-    },
-    thumbnail: {
-      mode: form.thumbnail?.mode === 'logoColor' ? 'logoColor' : 'image',
-      kind: 'none',
-      path: '',
-      id: '',
-      fileKey: '',
-      logo: {
-        id: '',
-        fileKey: '',
-      },
-      backgroundColor: String(form.thumbnail?.backgroundColor || '#1f1f1f'),
-      paddingPercent: Number(form.thumbnail?.paddingPercent ?? DEFAULT_LOGO_PADDING_PERCENT),
-    },
-    gallery: [],
-  };
-
-  const addFileEntry = (fileKey, file) => {
-    if (!fileKey || !file) return;
-    fileEntries.push({ fileKey, file });
-    fileSignatureTokens.push(
-      `${fileKey}:${file.name}:${file.size}:${file.lastModified}:${file.type || ''}`
-    );
-  };
-
-  if (snapshot.thumbnail.mode === 'logoColor') {
-    snapshot.thumbnail.logo.id = String(form.thumbnail?.logo?.id || 'logo');
-    if (form.thumbnail?.logo?.file) {
-      snapshot.thumbnail.kind = 'new';
-      snapshot.thumbnail.logo.fileKey = `thumbnail_logo:${snapshot.thumbnail.logo.id}`;
-      addFileEntry(snapshot.thumbnail.logo.fileKey, form.thumbnail.logo.file);
-    } else if (form.thumbnail?.kind === 'existing' && form.thumbnail?.path) {
-      snapshot.thumbnail.kind = 'existing';
-      snapshot.thumbnail.path = form.thumbnail.path;
-    }
-  } else if (form.thumbnail?.kind === 'new' && form.thumbnail?.file) {
-    snapshot.thumbnail.kind = 'new';
-    snapshot.thumbnail.id = String(form.thumbnail?.id || 'thumbnail');
-    snapshot.thumbnail.fileKey = `thumbnail_image:${snapshot.thumbnail.id}`;
-    addFileEntry(snapshot.thumbnail.fileKey, form.thumbnail.file);
-  } else if (form.thumbnail?.kind === 'existing' && form.thumbnail?.path) {
-    snapshot.thumbnail.kind = 'existing';
-    snapshot.thumbnail.path = form.thumbnail.path;
-  }
-
-  const galleryList = Array.isArray(form.gallery) ? form.gallery : [];
-  snapshot.gallery = galleryList.map((item) => {
-    if (item.kind === 'new' && item.file) {
-      const itemId = String(item.id || createId());
-      const fileKey = `gallery:${itemId}`;
-      addFileEntry(fileKey, item.file);
-      return {
-        kind: 'new',
-        id: itemId,
-        name: item.name || item.file.name,
-        fileKey,
-      };
-    }
-    return {
-      kind: 'existing',
-      id: String(item.id || createId()),
-      path: item.path,
-      name: item.name || String(item.path || '').split('/').at(-1),
-    };
-  });
-
-  fileSignatureTokens.sort();
-  return {
-    snapshot,
-    fileEntries,
-    filesSignature: fileSignatureTokens.join('|'),
-  };
-}
-
-function hydrateCreateDraftFromBinary(payload, fallbackCategory = '') {
-  const base = emptyForm(fallbackCategory);
-  if (!payload?.snapshot || typeof payload.snapshot !== 'object') {
-    return {
-      form: base,
-      missingFileCount: 0,
-    };
-  }
-
-  const snapshot = payload.snapshot;
-  const filesByKey = payload.filesByKey || new Map();
-  let missingFileCount = 0;
-
-  const nextForm = {
-    ...base,
-    id: String(snapshot.id || base.id),
-    category: String(snapshot.category || fallbackCategory || ''),
-    common: {
-      ...base.common,
-      ...(snapshot.common || {}),
-      icons: Array.isArray(snapshot.common?.icons) ? snapshot.common.icons : [],
-    },
-    locales: {
-      ...base.locales,
-      ...(snapshot.locales || {}),
-    },
-    thumbnail: {
-      ...base.thumbnail,
-      mode: snapshot.thumbnail?.mode === 'logoColor' ? 'logoColor' : 'image',
-      backgroundColor: String(snapshot.thumbnail?.backgroundColor || '#1f1f1f'),
-      paddingPercent: Number(snapshot.thumbnail?.paddingPercent ?? DEFAULT_LOGO_PADDING_PERCENT),
-    },
-    gallery: [],
-  };
-
-  if (snapshot.thumbnail?.kind === 'existing' && snapshot.thumbnail?.path) {
-    nextForm.thumbnail = {
-      ...nextForm.thumbnail,
-      kind: 'existing',
-      path: snapshot.thumbnail.path,
-      preview: toAssetPreviewUrl(snapshot.thumbnail.path),
-    };
-  } else if (snapshot.thumbnail?.kind === 'new') {
-    if (nextForm.thumbnail.mode === 'logoColor') {
-      const logoFile = filesByKey.get(snapshot.thumbnail?.logo?.fileKey || '');
-      if (logoFile) {
-        nextForm.thumbnail = {
-          ...nextForm.thumbnail,
-          kind: 'new',
-          logo: {
-            id: String(snapshot.thumbnail?.logo?.id || createId()),
-            file: logoFile,
-            name: logoFile.name,
-          },
-        };
-      } else {
-        missingFileCount += 1;
-      }
-    } else {
-      const thumbFile = filesByKey.get(snapshot.thumbnail?.fileKey || '');
-      if (thumbFile) {
-        nextForm.thumbnail = {
-          ...nextForm.thumbnail,
-          kind: 'new',
-          id: String(snapshot.thumbnail?.id || createId()),
-          file: thumbFile,
-          preview: URL.createObjectURL(thumbFile),
-        };
-      } else {
-        missingFileCount += 1;
-      }
-    }
-  }
-
-  const gallerySnapshot = Array.isArray(snapshot.gallery) ? snapshot.gallery : [];
-  nextForm.gallery = gallerySnapshot.flatMap((item) => {
-    if (item.kind === 'existing' && item.path) {
-      return [
-        {
-          id: String(item.id || createId()),
-          kind: 'existing',
-          path: item.path,
-          preview: toAssetPreviewUrl(item.path),
-          name: item.name || String(item.path).split('/').at(-1),
-          file: null,
-        },
-      ];
-    }
-    if (item.kind === 'new' && item.fileKey) {
-      const file = filesByKey.get(item.fileKey);
-      if (!file) {
-        missingFileCount += 1;
-        return [];
-      }
-      return [
-        {
-          id: String(item.id || createId()),
-          kind: 'new',
-          path: '',
-          preview: URL.createObjectURL(file),
-          name: item.name || file.name,
-          file,
-        },
-      ];
-    }
-    return [];
-  });
-
-  return {
-    form: nextForm,
-    missingFileCount,
-  };
-}
-
-function detachCreateDraftWithFreshPreviews(sourceForm, fallbackCategory = '') {
-  const payload = buildDraftBinaryPayload(sourceForm);
-  if (!payload?.snapshot) {
-    return emptyForm(fallbackCategory);
-  }
-
-  const filesByKey = new Map();
-  payload.fileEntries.forEach((entry) => {
-    if (!entry?.fileKey || !entry?.file) return;
-    filesByKey.set(entry.fileKey, entry.file);
-  });
-
-  return hydrateCreateDraftFromBinary(
-    {
-      snapshot: payload.snapshot,
-      filesByKey,
-    },
-    fallbackCategory
-  ).form;
-}
-
-function revokeObjectUrls(form) {
-  if (!form) return;
-  if (form.thumbnail?.kind === 'new' && form.thumbnail.preview) {
-    URL.revokeObjectURL(form.thumbnail.preview);
-  }
-  form.gallery?.forEach((item) => {
-    if (item.kind === 'new' && item.preview) {
-      URL.revokeObjectURL(item.preview);
-    }
-  });
-  if (form.thumbnail?.mode === 'logoColor' && form.thumbnail?.preview) {
-    URL.revokeObjectURL(form.thumbnail.preview);
-  }
-}
-
-function toAssetPreviewUrl(relativePath) {
-  if (!relativePath) return '';
-  return `${API_BASE}/api/image?path=${encodeURIComponent(relativePath)}`;
-}
-
-function getStackIconFileName(iconClass) {
-  const normalized = String(iconClass || '').trim().toLowerCase();
-  if (!normalized) return '';
-  if (normalized === 'c') return 'C.svg';
-  return `${normalized}.svg`;
-}
-
-function StackIcon({ iconClass, alt }) {
-  const fileName = getStackIconFileName(iconClass);
-  const sources = useMemo(() => {
-    if (!fileName) return [];
-    return [
-      `${API_BASE}/api/image?path=${encodeURIComponent(`assets/icons/skills/${fileName}`)}`,
-      `/stack-icons/${fileName}`,
-    ];
-  }, [fileName]);
-
-  const [index, setIndex] = useState(0);
-
-  if (!sources.length || index >= sources.length) return null;
-  return (
-    <img
-      className="stack-icon"
-      src={sources[index]}
-      alt={alt || iconClass}
-      onError={() => setIndex((value) => value + 1)}
-    />
-  );
-}
-
-async function apiRequest(endpoint, options = {}) {
-  const response = await fetch(`${API_BASE}${endpoint}`, options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.message || 'Erro na API.');
-  }
-  return payload;
+/** The same line for a notice: the language and field in words instead of the project id and JSON key. */
+function readableIssue(line) {
+  const match = /^.*? \(([a-z_]+)\): ([\s\S]*)$/.exec(line);
+  if (!match) return line;
+  const key = match[1];
+  const language = key.endsWith('en') ? 'Inglês' : key.endsWith('es') ? 'Espanhol' : 'Português';
+  return `${language}${key.startsWith('summary') ? ', resumo' : ''}: ${match[2]}`;
 }
 
 function App() {
-  const [meta, setMeta] = useState({
-    categories: [],
-    knownIcons: [],
-    locales: DEFAULT_LOCALES,
-  });
+  const [meta, setMeta] = useState(EMPTY_META);
   const [projects, setProjects] = useState([]);
   const [mode, setMode] = useState('create');
   const [selectedId, setSelectedId] = useState('');
-  const [activeLocale, setActiveLocale] = useState('pt');
-  const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [form, setForm] = useState(emptyForm());
+  const [savedPayload, setSavedPayload] = useState('');
+  const [measurement, setMeasurement] = useState(null);
+  const [draft, setDraft] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [notice, setNotice] = useState(null);
+  const [issues, setIssues] = useState({ pt: [], en: [], es: [] });
+  const [checking, setChecking] = useState(false);
+  const [overlap, setOverlap] = useState(DEFAULT_SPLIT_OVERLAP);
+  const [busyText, setBusyText] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
-  const [feedback, setFeedback] = useState('');
-  const [error, setError] = useState('');
-  const [form, setForm] = useState(emptyForm());
-  const [draggingGalleryId, setDraggingGalleryId] = useState('');
-  const [draggingProjectId, setDraggingProjectId] = useState('');
-  const [isReorderingProjects, setIsReorderingProjects] = useState(false);
-  const [isSplittingGallery, setIsSplittingGallery] = useState(false);
-  const [splitProgressText, setSplitProgressText] = useState('');
-  const [gallerySplitOverlap, setGallerySplitOverlap] = useState(DEFAULT_SPLIT_OVERLAP);
-  const [isConsoleOpen, setIsConsoleOpen] = useState(false);
   const [consoleLogs, setConsoleLogs] = useState([]);
   const [consoleStatus, setConsoleStatus] = useState('idle');
-  const consoleBodyRef = useRef(null);
-  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteText, setDeleteText] = useState('');
   const [isDeleting, setIsDeleting] = useState(false);
-  const [createDraft, setCreateDraft] = useState(emptyForm());
-  const [isDraftHydrated, setIsDraftHydrated] = useState(false);
-  const draftSaveTimerRef = useRef(null);
-  const draftFileSignatureRef = useRef('');
+  const consoleRef = useRef(null);
+  const deleteRef = useRef(null);
+  const draftReady = useRef(false);
+  const draftSignature = useRef('');
 
-  const replaceForm = (nextForm) => {
+  const say = (tone, message, list = []) => setNotice({ tone, message, list });
+
+  const replaceForm = (next) =>
     setForm((previous) => {
-      revokeObjectUrls(previous);
-      return nextForm;
+      if (previous !== draft) revokePreviews(previous);
+      return next;
     });
-  };
 
   const refreshProjects = async () => {
-    const result = await apiRequest('/api/projects?lang=pt');
+    const result = await apiRequest('/api/projects');
     setProjects(result.projects || []);
   };
 
-  const loadMetaAndProjects = async () => {
+  const loadAll = async () => {
     setIsLoading(true);
-    setError('');
-    setIsDraftHydrated(false);
+    draftReady.current = false;
     try {
       const [metaResponse] = await Promise.all([apiRequest('/api/meta'), refreshProjects()]);
-      setMeta({
-        categories: metaResponse.categories || [],
-        knownIcons: metaResponse.knownIcons || [],
-        locales: metaResponse.locales || DEFAULT_LOCALES,
-      });
-      const defaultCategory = (metaResponse.categories || [])[0] || '';
-      const persistedDraft = await loadCreateDraftFromDb();
-      if (persistedDraft?.snapshot) {
-        const restored = hydrateCreateDraftFromBinary(persistedDraft, defaultCategory);
-        setCreateDraft(restored.form);
-        const initialPayload = buildDraftBinaryPayload(restored.form);
-        draftFileSignatureRef.current = initialPayload?.filesSignature || '';
-        replaceForm(restored.form);
-        if (restored.missingFileCount > 0) {
-          setFeedback(
-            `Rascunho restaurado com ${restored.missingFileCount} arquivo(s) indisponivel(is).`
-          );
-        }
-      } else {
-        const blank = emptyForm(defaultCategory);
-        setCreateDraft(blank);
-        draftFileSignatureRef.current = '';
-        replaceForm(blank);
-      }
-    } catch (requestError) {
-      setError(requestError.message);
+      setMeta({ ...EMPTY_META, ...metaResponse });
+      const stored = await loadCreateDraftFromDb().catch(() => null);
+      const restored = hydrateDraft(stored);
+      draftSignature.current = buildDraftPayload(restored.form).filesSignature;
+      setDraft(isDraftMeaningful(restored.form) ? restored.form : null);
+      setMode('create');
+      setSelectedId('');
+      setMeasurement(null);
+      replaceForm(restored.form);
+      setSavedPayload('');
+      if (restored.missingFiles) say('warn', `Rascunho restaurado sem ${restored.missingFiles} imagem(ns) que o navegador não guardou.`);
+    } catch (error) {
+      say('error', `${error.message} A API está rodando em ${API_BASE}?`);
     } finally {
-      setIsDraftHydrated(true);
+      draftReady.current = true;
       setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    loadMetaAndProjects();
-    return () => {
-      revokeObjectUrls(form);
-      if (draftSaveTimerRef.current) {
-        clearTimeout(draftSaveTimerRef.current);
-      }
-    };
+    loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // New-project draft: saved to IndexedDB a moment after each change, files only when they change.
   useEffect(() => {
-    if (mode !== 'create') return;
-    setCreateDraft(form);
+    if (!draftReady.current || mode !== 'create') return undefined;
+    if (!isDraftMeaningful(form)) {
+      setDraft(null);
+      draftSignature.current = '';
+      void clearCreateDraftFromDb();
+      return undefined;
+    }
+    setDraft(form);
+    const timer = setTimeout(() => {
+      const payload = buildDraftPayload(form);
+      const filesChanged = payload.filesSignature !== draftSignature.current;
+      saveCreateDraftToDb({ snapshot: payload.snapshot, fileEntries: filesChanged ? payload.fileEntries : [], replaceFiles: filesChanged })
+        .then(() => {
+          if (filesChanged) draftSignature.current = payload.filesSignature;
+        })
+        .catch((error) => console.warn('[draft]', error?.message || error));
+    }, 400);
+    return () => clearTimeout(timer);
   }, [form, mode]);
 
-  useEffect(() => {
-    if (!isDraftHydrated) {
-      return undefined;
-    }
-    if (mode !== 'create') {
-      return undefined;
-    }
-
-    if (!isDraftMeaningful(createDraft)) {
-      draftFileSignatureRef.current = '';
-      void clearCreateDraftFromDb();
-      return;
-    }
-
-    if (draftSaveTimerRef.current) {
-      clearTimeout(draftSaveTimerRef.current);
-    }
-    draftSaveTimerRef.current = setTimeout(() => {
-      const payload = buildDraftBinaryPayload(createDraft);
-      if (!payload) return;
-      const hasFileChanges = draftFileSignatureRef.current !== payload.filesSignature;
-      void saveCreateDraftToDb({
-        snapshot: payload.snapshot,
-        fileEntries: hasFileChanges ? payload.fileEntries : [],
-        replaceFiles: hasFileChanges,
-      })
-        .then(() => {
-          if (hasFileChanges) {
-            draftFileSignatureRef.current = payload.filesSignature;
-          }
-        })
-        .catch((saveError) => {
-          console.warn('[draft-save]', saveError?.message || saveError);
-        });
-    }, 350);
-
-    return () => {
-      if (draftSaveTimerRef.current) {
-        clearTimeout(draftSaveTimerRef.current);
-      }
-    };
-  }, [createDraft, mode, isDraftHydrated]);
-
-  useEffect(() => {
-    if (!isConsoleOpen || !consoleBodyRef.current) return;
-    consoleBodyRef.current.scrollTop = consoleBodyRef.current.scrollHeight;
-  }, [consoleLogs, isConsoleOpen]);
-
-  useEffect(() => {
-    let canceled = false;
-
-    const syncLogoPreview = async () => {
-      if (form.thumbnail.mode !== 'logoColor' || !form.thumbnail.logo?.file) {
-        if (form.thumbnail.mode === 'logoColor') {
-          setForm((current) => {
-            if (current.thumbnail.mode !== 'logoColor' || !current.thumbnail.preview) return current;
-            if (current.thumbnail.preview.startsWith('blob:')) {
-              URL.revokeObjectURL(current.thumbnail.preview);
-            }
-            return {
-              ...current,
-              thumbnail: {
-                ...current.thumbnail,
-                preview: '',
-              },
-            };
-          });
-        }
-        return;
-      }
-
-      try {
-        const previewFile = await generateLogoThumbnailPreviewFile(
-          form.thumbnail.logo.file,
-          form.thumbnail.backgroundColor,
-          form.thumbnail.paddingPercent
-        );
-        if (canceled) return;
-        const previewUrl = URL.createObjectURL(previewFile);
-        setForm((current) => {
-          if (current.thumbnail.mode !== 'logoColor') {
-            URL.revokeObjectURL(previewUrl);
-            return current;
-          }
-          if (current.thumbnail.preview && current.thumbnail.preview.startsWith('blob:')) {
-            URL.revokeObjectURL(current.thumbnail.preview);
-          }
-          return {
-            ...current,
-            thumbnail: {
-              ...current.thumbnail,
-              preview: previewUrl,
-            },
-          };
-        });
-      } catch {
-        if (!canceled) {
-          setError('Nao foi possivel gerar o preview da thumb (Logo + Cor).');
-        }
-      }
-    };
-
-    syncLogoPreview();
-
-    return () => {
-      canceled = true;
-    };
-  }, [
-    form.thumbnail.mode,
-    form.thumbnail.logo?.file,
-    form.thumbnail.backgroundColor,
-    form.thumbnail.paddingPercent,
-  ]);
-
-  const appendConsoleLog = (message, level = 'info') => {
-    const timestamp = new Date().toLocaleTimeString('pt-BR', { hour12: false });
-    setConsoleLogs((current) => [
-      ...current,
-      {
-        id: createId(),
-        timestamp,
-        level,
-        message: String(message || ''),
-      },
-    ]);
-  };
-
-  const filteredProjects = useMemo(() => {
-    const normalizedSearch = search.trim().toLowerCase();
-    const persistedDraftVisible = isDraftMeaningful(createDraft)
-      ? {
-          id: createDraft.id,
-          slug: 'rascunho',
-          category: createDraft.category || meta.categories[0] || 'sem-categoria',
-          index: -1,
-          title: (createDraft.locales?.pt?.title || '').trim() || 'Novo projeto (rascunho)',
-          image: createDraft.thumbnail?.preview
-            ? createDraft.thumbnail.preview
-            : createDraft.thumbnail?.path || '',
-          developed: false,
-          compatibility: Number(createDraft.common?.compatibility || 3),
-          icons: Array.isArray(createDraft.common?.icons) ? createDraft.common.icons : [],
-          isDraft: true,
-        }
-      : null;
-
-    const normalizedList = projects.filter((project) => {
-      if (categoryFilter !== 'all' && project.category !== categoryFilter) {
-        return false;
-      }
-      if (!normalizedSearch) return true;
-      return (
-        project.title.toLowerCase().includes(normalizedSearch) ||
-        (project.id || '').toLowerCase().includes(normalizedSearch) ||
-        (project.slug || '').toLowerCase().includes(normalizedSearch)
-      );
-    });
-
-    if (!persistedDraftVisible) {
-      return normalizedList;
-    }
-
-    if (
-      categoryFilter !== 'all' &&
-      persistedDraftVisible.category !== categoryFilter
-    ) {
-      return normalizedList;
-    }
-
-    if (normalizedSearch) {
-      const searchable = [
-        persistedDraftVisible.title.toLowerCase(),
-        persistedDraftVisible.id.toLowerCase(),
-        persistedDraftVisible.slug,
-        persistedDraftVisible.category.toLowerCase(),
-      ];
-      if (!searchable.some((value) => value.includes(normalizedSearch))) {
-        return normalizedList;
-      }
-    }
-
-    return [persistedDraftVisible, ...normalizedList];
-  }, [projects, search, categoryFilter, createDraft, meta.categories]);
-
-  const canDragReorderProjects = useMemo(
-    () => categoryFilter !== 'all' && !search.trim() && !isLoading,
-    [categoryFilter, search, isLoading]
+  // The content standard, checked by the API with the site's own rules a moment after the texts change.
+  const checkKey = useMemo(
+    () => JSON.stringify({ id: form.id, texts: form.texts }),
+    [form.id, form.texts]
   );
+  useEffect(() => {
+    const hasText = LOCALES.some((locale) => form.texts[locale].description || form.texts[locale].summary);
+    if (!hasText) {
+      setIssues({ pt: [], en: [], es: [] });
+      return undefined;
+    }
+    setChecking(true);
+    const timer = setTimeout(() => {
+      jsonRequest('/api/check', { payload: { ...toPayload(form), stack: form.stack } })
+        .then((result) => setIssues(groupIssues(result.errors || [])))
+        .catch(() => {})
+        .finally(() => setChecking(false));
+    }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkKey]);
 
-  const restoreCreateDraft = () => {
+  useEffect(() => {
+    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+  }, [consoleLogs]);
+
+  const isDirty = mode === 'edit' && savedPayload && JSON.stringify(toPayload(form)) !== savedPayload;
+  const issueCount = issues.pt.length + issues.en.length + issues.es.length;
+
+  const confirmLeave = () => !isDirty || window.confirm('Há alterações não salvas neste projeto. Descartar?');
+
+  const startNew = () => {
+    if (!confirmLeave()) return;
     setMode('create');
     setSelectedId('');
-    setError('');
-    setFeedback('');
-    setIsDeleteModalOpen(false);
-    setDeleteConfirmText('');
-    setIsDeleting(false);
-    replaceForm(createDraft);
+    setMeasurement(null);
+    setNotice(null);
+    replaceForm(draft || emptyForm());
   };
 
-  const reorderProjectsInCategory = (projectIdFrom, projectIdTo) => {
-    if (!projectIdFrom || !projectIdTo || projectIdFrom === projectIdTo) {
-      return null;
-    }
-
-    const categoryProjects = projects.filter((project) => project.category === categoryFilter);
-    const fromIndex = categoryProjects.findIndex((project) => project.id === projectIdFrom);
-    const toIndex = categoryProjects.findIndex((project) => project.id === projectIdTo);
-    if (fromIndex < 0 || toIndex < 0) return null;
-
-    const reorderedCategory = [...categoryProjects];
-    const [moved] = reorderedCategory.splice(fromIndex, 1);
-    reorderedCategory.splice(toIndex, 0, moved);
-    const reorderedIds = reorderedCategory.map((project) => project.id);
-
-    const next = [];
-    let pointer = 0;
-    for (const project of projects) {
-      if (project.category !== categoryFilter) {
-        next.push(project);
-        continue;
-      }
-      next.push(reorderedCategory[pointer]);
-      pointer += 1;
-    }
-
-    setProjects(next);
-    return reorderedIds;
-  };
-
-  const persistProjectOrder = async (orderedIds) => {
-    if (!Array.isArray(orderedIds) || orderedIds.length === 0) return;
-    setIsReorderingProjects(true);
-    setError('');
-    try {
-      const response = await apiRequest('/api/projects/reorder?lang=pt', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          category: categoryFilter,
-          orderedIds,
-        }),
-      });
-      setFeedback(response.message || 'Ordem dos projetos atualizada.');
-      await refreshProjects();
-    } catch (requestError) {
-      setError(requestError.message);
-      await refreshProjects();
-    } finally {
-      setIsReorderingProjects(false);
-    }
-  };
-
-  const resetForCreate = () => {
-    setMode('create');
-    setSelectedId('');
-    setError('');
-    setFeedback('');
-    setIsDeleteModalOpen(false);
-    setDeleteConfirmText('');
-    setIsDeleting(false);
-    const defaultCategory = meta.categories[0] || '';
-    const blank = emptyForm(defaultCategory);
-    setCreateDraft(blank);
-    draftFileSignatureRef.current = '';
+  const discardDraft = () => {
+    if (!window.confirm('Apagar o rascunho do projeto novo?')) return;
     void clearCreateDraftFromDb();
-    replaceForm(blank);
+    draftSignature.current = '';
+    setDraft(null);
+    if (mode === 'create') replaceForm(emptyForm());
   };
 
-  const loadProjectForEdit = async (projectId) => {
-    setError('');
-    setFeedback('');
+  const openProject = async (id) => {
+    if (id === selectedId || !confirmLeave()) return;
+    setNotice(null);
     try {
-      const data = await apiRequest(`/api/projects/${encodeURIComponent(projectId)}?lang=pt`);
-      const nextForm = {
-        id: data.id || projectId,
-        category: data.category || '',
-        common: {
-          ...emptyCommon(),
-          ...(data.common || {}),
-          adult: Boolean(data.common?.adult),
-          featured: Boolean(data.common?.featured),
-          compatibility: Number(data.common?.compatibility || 3),
-          developingPorcentage: Number(data.common?.developingPorcentage || 0),
-          icons: Array.isArray(data.common?.icons) ? data.common.icons : [],
-        },
-        locales: {
-          ...emptyLocales(),
-          ...(data.locales || {}),
-        },
-        thumbnail: data.image
-          ? {
-              mode: 'image',
-              kind: 'existing',
-              path: data.image,
-              preview: toAssetPreviewUrl(data.image),
-              id: '',
-              file: null,
-              logo: { id: '', file: null, name: '' },
-              backgroundColor: '#1f1f1f',
-              paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
-            }
-          : {
-              mode: 'image',
-              kind: 'none',
-              path: '',
-              preview: '',
-              id: '',
-              file: null,
-              logo: { id: '', file: null, name: '' },
-              backgroundColor: '#1f1f1f',
-              paddingPercent: DEFAULT_LOGO_PADDING_PERCENT,
-            },
-        gallery: (data.images || []).map((imagePath) => ({
-          id: createId(),
-          kind: 'existing',
-          path: imagePath,
-          preview: toAssetPreviewUrl(imagePath),
-          name: imagePath.split('/').at(-1),
-          file: null,
-        })),
-      };
-      if (mode === 'create') {
-        const fallbackCategory = meta.categories[0] || '';
-        const parkedDraft = detachCreateDraftWithFreshPreviews(form, fallbackCategory);
-        const parkedPayload = buildDraftBinaryPayload(parkedDraft);
-        setCreateDraft((previous) => {
-          if (previous && previous !== form) {
-            revokeObjectUrls(previous);
-          }
-          return parkedDraft;
-        });
-        draftFileSignatureRef.current = parkedPayload?.filesSignature || '';
-        if (parkedPayload && isDraftMeaningful(parkedDraft)) {
-          void saveCreateDraftToDb({
-            snapshot: parkedPayload.snapshot,
-            fileEntries: parkedPayload.fileEntries,
-            replaceFiles: true,
-          }).catch((saveError) => {
-            console.warn('[draft-save-on-switch]', saveError?.message || saveError);
-          });
-        }
-      }
+      const data = await apiRequest(`/api/projects/${encodeURIComponent(id)}`);
+      const next = formFromProject(data);
       setMode('edit');
-      setSelectedId(data.id || projectId);
-      replaceForm(nextForm);
-    } catch (requestError) {
-      setError(requestError.message);
+      setSelectedId(id);
+      setMeasurement(data.measurement);
+      replaceForm(next);
+      setSavedPayload(JSON.stringify(toPayload(next)));
+      document.querySelector('.editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+      say('error', error.message);
     }
   };
 
-  const updateCommon = (field, value) => {
-    setForm((current) => ({
-      ...current,
-      common: {
-        ...current.common,
-        [field]: value,
-      },
-    }));
-  };
-
-  const updateLocaleField = (locale, field, value) => {
-    setForm((current) => ({
-      ...current,
-      locales: {
-        ...current.locales,
-        [locale]: {
-          ...current.locales[locale],
-          [field]: value,
-        },
-      },
-    }));
-  };
-
-  const addKnownIcon = (iconClass) => {
+  const onField = (field, value) =>
     setForm((current) => {
-      if (current.common.icons.some((icon) => icon.class === iconClass)) {
-        return current;
+      const next = { ...current, [field]: value };
+      if (field === 'title' && mode === 'create' && !current.idTouched) next.id = toSlug(value);
+      if (field === 'id') {
+        next.id = toSlug(value);
+        next.idTouched = true;
       }
-      return {
-        ...current,
-        common: {
-          ...current.common,
-          icons: [...current.common.icons, { class: iconClass, tooltip: iconClass.toUpperCase() }],
-        },
-      };
+      if (field === 'url' && !String(value).trim()) next.offline = false;
+      if (field === 'offline' && value) next.performance = false;
+      return next;
     });
-  };
 
-  const addCustomIcon = () => {
+  const onText = (locale, field, value) =>
     setForm((current) => ({
       ...current,
-      common: {
-        ...current.common,
-        icons: [...current.common.icons, { class: '', tooltip: '' }],
-      },
+      texts: { ...current.texts, [locale]: { ...current.texts[locale], [field]: value } },
     }));
-  };
-
-  const updateIcon = (iconIndex, field, value) => {
-    setForm((current) => ({
-      ...current,
-      common: {
-        ...current.common,
-        icons: current.common.icons.map((icon, index) =>
-          index === iconIndex ? { ...icon, [field]: value } : icon
-        ),
-      },
-    }));
-  };
-
-  const removeIcon = (iconIndex) => {
-    setForm((current) => ({
-      ...current,
-      common: {
-        ...current.common,
-        icons: current.common.icons.filter((_, index) => index !== iconIndex),
-      },
-    }));
-  };
-
-  const toNewGalleryItem = (file, displayName = file.name) => ({
-    id: createId(),
-    kind: 'new',
-    name: displayName,
-    file,
-    path: '',
-    preview: URL.createObjectURL(file),
-  });
 
   const addGalleryFiles = async (fileList) => {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-
-    setError('');
-    setFeedback('');
-    setIsSplittingGallery(true);
-    const overlap = Number.isFinite(Number(gallerySplitOverlap))
-      ? Number(gallerySplitOverlap)
-      : DEFAULT_SPLIT_OVERLAP;
-    const nextItems = [];
-    const splitSummaries = [];
+    const items = [];
     const warnings = [];
-
     try {
       for (let index = 0; index < files.length; index += 1) {
         const file = files[index];
-        const imageCandidates = [];
-
+        let candidates = [file];
         if (isPdfFile(file)) {
-          setSplitProgressText(`Convertendo PDF... ${index + 1}/${files.length} (${file.name})`);
+          setBusyText(`Convertendo PDF ${index + 1} de ${files.length}…`);
           try {
-            const pdfPageImages = await convertPdfToPngFiles(file);
-            imageCandidates.push(...pdfPageImages);
-            splitSummaries.push(`${file.name} -> ${pdfPageImages.length} paginas`);
-          } catch (pdfError) {
-            warnings.push(
-              `Falha ao converter PDF "${file.name}". ${pdfError.message || ''}`.trim()
-            );
+            candidates = await convertPdfToPngFiles(file);
+          } catch (error) {
+            warnings.push(`PDF "${file.name}" não converteu: ${error.message}`);
             continue;
           }
-        } else {
-          imageCandidates.push(file);
         }
-
-        for (let candidateIndex = 0; candidateIndex < imageCandidates.length; candidateIndex += 1) {
-          const candidateFile = imageCandidates[candidateIndex];
-          setSplitProgressText(
-            `Splitting... ${index + 1}/${files.length} (${candidateFile.name})`
-          );
+        for (const candidate of candidates) {
+          setBusyText(`Preparando ${candidate.name}…`);
           try {
-            const splitResult = await splitTallImageFile(candidateFile, overlap);
-            if (splitResult.didSplit) {
-              splitSummaries.push(`${candidateFile.name} -> ${splitResult.files.length} frames`);
-            }
-            splitResult.files.forEach((item) => {
-              nextItems.push(toNewGalleryItem(item, item.name));
-            });
+            const result = await splitTallImageFile(candidate, overlap);
+            result.files.forEach((part) => items.push({ id: createId(), kind: 'new', name: part.name, file: part, preview: URL.createObjectURL(part) }));
           } catch {
-            warnings.push(`Falha no split de "${candidateFile.name}". A imagem original foi mantida.`);
-            nextItems.push(toNewGalleryItem(candidateFile, candidateFile.name));
+            warnings.push(`"${candidate.name}" entrou inteira (o corte em quadros falhou).`);
+            items.push({ id: createId(), kind: 'new', name: candidate.name, file: candidate, preview: URL.createObjectURL(candidate) });
             await waitNextFrame();
           }
         }
       }
     } finally {
-      setIsSplittingGallery(false);
-      setSplitProgressText('');
+      setBusyText('');
     }
-
-    if (nextItems.length > 0) {
-      setForm((current) => ({
-        ...current,
-        gallery: [...current.gallery, ...nextItems],
-      }));
-    }
-
-    if (splitSummaries.length > 0) {
-      setFeedback(`Split concluido: ${splitSummaries.join(' | ')}`);
-    }
-    if (warnings.length > 0) {
-      setError(warnings.join(' '));
-    }
+    if (items.length) setForm((current) => ({ ...current, gallery: [...current.gallery, ...items] }));
+    if (warnings.length) say('warn', 'Algumas imagens precisam de atenção.', warnings);
   };
 
-  const removeGalleryImage = (imageId) => {
+  const removeImage = (imageId) =>
     setForm((current) => {
-      const target = current.gallery.find((item) => item.id === imageId);
-      if (target?.kind === 'new' && target.preview) {
-        URL.revokeObjectURL(target.preview);
-      }
-      return {
-        ...current,
-        gallery: current.gallery.filter((item) => item.id !== imageId),
-      };
+      const target = current.gallery.find((image) => image.id === imageId);
+      if (target?.kind === 'new' && target.preview) URL.revokeObjectURL(target.preview);
+      return { ...current, gallery: current.gallery.filter((image) => image.id !== imageId) };
     });
-  };
 
-  const moveGalleryImageByDrag = (fromId, toId) => {
+  const moveImage = (fromId, toId) => {
     if (!fromId || !toId || fromId === toId) return;
     setForm((current) => {
-      const fromIndex = current.gallery.findIndex((item) => item.id === fromId);
-      const toIndex = current.gallery.findIndex((item) => item.id === toId);
-      if (fromIndex < 0 || toIndex < 0) return current;
-      const reordered = [...current.gallery];
-      const [moved] = reordered.splice(fromIndex, 1);
-      reordered.splice(toIndex, 0, moved);
-      return {
-        ...current,
-        gallery: reordered,
-      };
+      const list = [...current.gallery];
+      const from = list.findIndex((image) => image.id === fromId);
+      const to = list.findIndex((image) => image.id === toId);
+      if (from < 0 || to < 0) return current;
+      list.splice(to, 0, ...list.splice(from, 1));
+      return { ...current, gallery: list };
     });
   };
 
-  const setNewThumbnail = (file) => {
-    if (!file) return;
-    setForm((current) => {
-      if (current.thumbnail.kind === 'new' && current.thumbnail.preview) {
-        URL.revokeObjectURL(current.thumbnail.preview);
-      }
-      return {
-        ...current,
-        thumbnail: {
-          ...current.thumbnail,
-          mode: 'image',
-          kind: 'new',
-          id: createId(),
-          file,
-          path: '',
-          preview: URL.createObjectURL(file),
-          logo: { id: '', file: null, name: '' },
-        },
-      };
-    });
+  const openConsole = () => {
+    const dialog = consoleRef.current?.closest('dialog');
+    if (dialog && !dialog.open) dialog.showModal();
   };
 
-  const toggleLogoColorThumbnailMode = (enabled) => {
-    setForm((current) => {
-      const previousPreview = current.thumbnail.preview;
-      if (previousPreview && previousPreview.startsWith('blob:')) {
-        URL.revokeObjectURL(previousPreview);
-      }
-      if (enabled) {
-        return {
-          ...current,
-          thumbnail: {
-            ...current.thumbnail,
-            mode: 'logoColor',
-            kind: 'none',
-            path: '',
-            id: '',
-            file: null,
-            preview: '',
-          },
-        };
-      }
+  const log = (message, level = 'info') =>
+    setConsoleLogs((current) => [...current, { id: createId(), time: new Date().toLocaleTimeString('pt-BR', { hour12: false }), level, message: String(message || '') }]);
 
-      return {
-        ...current,
-        thumbnail: {
-          ...current.thumbnail,
-          mode: 'image',
-          kind: 'none',
-          path: '',
-          id: '',
-          file: null,
-          preview: '',
-          logo: { id: '', file: null, name: '' },
-        },
-      };
-    });
-  };
-
-  const setLogoThumbnailFile = (file) => {
-    if (!file) return;
-    setForm((current) => ({
-      ...current,
-      thumbnail: {
-        ...current.thumbnail,
-        mode: 'logoColor',
-        kind: 'new',
-        id: createId(),
-        file,
-        path: '',
-        logo: {
-          id: createId(),
-          file,
-          name: file.name,
-        },
-      },
-    }));
-  };
-
-  const clearThumbnail = () => {
-    setForm((current) => {
-      if (current.thumbnail.kind === 'new' && current.thumbnail.preview) {
-        URL.revokeObjectURL(current.thumbnail.preview);
-      }
-      return {
-        ...current,
-        thumbnail: {
-          ...current.thumbnail,
-          kind: 'none',
-          path: '',
-          preview: '',
-          id: '',
-          file: null,
-          logo: { id: '', file: null, name: '' },
-        },
-      };
-    });
-  };
-
-  const translatePtToOtherLocales = async () => {
-    setError('');
-    setFeedback('');
-
-    const ptTitle = (form.locales.pt?.title || '').trim();
-    const ptDescription = sanitizeRichTextHtml(form.locales.pt?.description || '');
-    if (!ptTitle && !ptDescription.trim()) {
-      setError('Preencha titulo ou descricao em PT antes de traduzir.');
+  const translate = async () => {
+    const pt = form.texts.pt;
+    const description = sanitizeRichTextHtml(pt.description);
+    if (!pt.summary.trim() && !description) {
+      say('warn', 'Escreva o resumo ou a descrição em português antes de traduzir.');
       return;
     }
-
-    const hasContentInTargets = ['en', 'es'].some((locale) => {
-      const localeData = form.locales[locale] || {};
-      return (localeData.title || '').trim() || (localeData.description || '').trim();
-    });
-
-    let shouldOverwrite = true;
-    if (hasContentInTargets) {
-      shouldOverwrite = window.confirm(
-        'EN/ES ja possuem conteudo. Clique OK para sobrescrever tudo. Clique Cancelar para preencher apenas campos vazios.'
-      );
-    }
+    const filled = ['en', 'es'].some((locale) => form.texts[locale].summary.trim() || form.texts[locale].description.trim());
+    const overwrite = !filled || window.confirm('Inglês e espanhol já têm texto. OK substitui tudo; Cancelar preenche só o que está vazio.');
 
     setIsTranslating(true);
-    setIsConsoleOpen(true);
     setConsoleStatus('running');
     setConsoleLogs([]);
-    appendConsoleLog('Iniciando traducao com Ollama...', 'info');
+    openConsole();
+    log('Pedindo a tradução ao Ollama…');
     try {
       const response = await fetch(`${API_BASE}/api/translate/stream`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          sourceLang: 'pt',
-          targets: ['en', 'es'],
-          content: {
-            title: ptTitle,
-            descriptionHtml: ptDescription,
-            iconsTooltips: [],
-          },
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: { summary: pt.summary, descriptionHtml: description, role: form.partner ? pt.role : '' } }),
       });
-
-      if (!response.ok) {
-        const payload = await response.json().catch(() => ({}));
-        throw new Error(payload.message || 'Falha ao iniciar traducao.');
-      }
-
-      if (!response.body) {
-        throw new Error('Nao foi possivel acompanhar o progresso da traducao.');
-      }
-
+      if (!response.ok || !response.body) throw new Error('A tradução não começou.');
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
-      let streamError = null;
-      let translatedPayload = null;
-
-      while (true) {
+      let result = null;
+      for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-
         let lineBreak = buffer.indexOf('\n');
         while (lineBreak >= 0) {
-          const rawLine = buffer.slice(0, lineBreak).trim();
+          const line = buffer.slice(0, lineBreak).trim();
           buffer = buffer.slice(lineBreak + 1);
           lineBreak = buffer.indexOf('\n');
-
-          if (!rawLine) continue;
-
-          let eventPayload;
-          try {
-            eventPayload = JSON.parse(rawLine);
-          } catch {
-            continue;
-          }
-
-          if (eventPayload.event === 'ping') {
-            continue;
-          }
-
-          if (eventPayload.event === 'log') {
-            appendConsoleLog(eventPayload.message || 'Processando...', eventPayload.level || 'info');
-            continue;
-          }
-
-          if (eventPayload.event === 'error') {
-            streamError = new Error(eventPayload.message || 'Falha na traducao via Ollama.');
-            break;
-          }
-
-          if (eventPayload.event === 'result') {
-            translatedPayload = eventPayload.translations || null;
-          }
+          if (!line) continue;
+          const event = JSON.parse(line);
+          if (event.event === 'log') log(event.message, event.level);
+          if (event.event === 'error') throw new Error(event.message);
+          if (event.event === 'result') result = event.translations;
         }
-
-        if (streamError) break;
       }
-
-      if (streamError) {
-        throw streamError;
-      }
-
-      if (!translatedPayload) {
-        throw new Error('A traducao terminou sem resultado valido.');
-      }
-
+      if (!result) throw new Error('A tradução terminou sem resultado.');
       setForm((current) => {
-        const nextLocales = { ...current.locales };
-
-        ['en', 'es'].forEach((locale) => {
-          const translated = translatedPayload?.[locale];
-          if (!translated) return;
-          const currentLocale = current.locales[locale] || { title: '', description: '' };
-          const translatedTitle = String(translated.title || '').trim();
-          const translatedDescription = sanitizeRichTextHtml(
-            String(translated.descriptionHtml || '')
-          );
-
-          nextLocales[locale] = {
-            title:
-              shouldOverwrite || !String(currentLocale.title || '').trim()
-                ? translatedTitle
-                : currentLocale.title,
-            description:
-              shouldOverwrite || !String(currentLocale.description || '').trim()
-                ? translatedDescription
-                : currentLocale.description,
+        const textsNext = { ...current.texts };
+        for (const locale of ['en', 'es']) {
+          const now = current.texts[locale];
+          const got = result[locale] || {};
+          const pick = (field, value) => (overwrite || !String(now[field] || '').trim() ? value : now[field]);
+          textsNext[locale] = {
+            summary: pick('summary', got.summary || ''),
+            description: pick('description', sanitizeRichTextHtml(got.descriptionHtml || '')),
+            role: pick('role', got.role || ''),
           };
-        });
-
-        return {
-          ...current,
-          locales: nextLocales,
-        };
+        }
+        return { ...current, texts: textsNext };
       });
-
-      appendConsoleLog('Traducoes aplicadas em EN/ES.', 'success');
+      log('Inglês e espanhol preenchidos. Revise antes de salvar.', 'success');
       setConsoleStatus('success');
-      setFeedback('Traducoes geradas com IA. Revise EN e ES antes de salvar.');
-    } catch (requestError) {
-      appendConsoleLog(requestError.message || 'Erro inesperado durante a traducao.', 'error');
+      say('success', 'Tradução aplicada em inglês e espanhol. Revise antes de salvar.');
+    } catch (error) {
+      log(error.message, 'error');
       setConsoleStatus('error');
-      setError(requestError.message);
+      say('error', error.message);
     } finally {
       setIsTranslating(false);
     }
   };
 
-  const validateBeforeSave = () => {
-    const validationErrors = [];
-
-    if (!form.category) validationErrors.push('Selecione uma categoria.');
-    if (!form.id || !String(form.id).trim()) validationErrors.push('ID do projeto nao pode ficar vazio.');
-
-    const sanitizedLocales = DEFAULT_LOCALES.reduce((accumulator, locale) => {
-      const title = (form.locales[locale]?.title || '').trim();
-      const description = sanitizeRichTextHtml(form.locales[locale]?.description || '');
-      accumulator[locale] = { title, description };
-      if (!title) {
-        validationErrors.push(`Titulo do locale ${locale.toUpperCase()} eh obrigatorio.`);
-      }
-      if (!description.trim()) {
-        validationErrors.push(`Descricao do locale ${locale.toUpperCase()} eh obrigatoria.`);
-      }
-      return accumulator;
-    }, {});
-
-    if (!form.common.initialDate.trim()) validationErrors.push('Data inicial eh obrigatoria.');
-    if (!form.common.endDate.trim()) validationErrors.push('Data final eh obrigatoria.');
-    if (!Array.isArray(form.common.icons) || form.common.icons.length === 0) {
-      validationErrors.push('Adicione ao menos 1 stack/tecnologia.');
-    }
-
-    const normalizedIcons = (form.common.icons || [])
-      .map((icon) => ({
-        class: (icon.class || '').trim(),
-        tooltip: (icon.tooltip || '').trim(),
-      }))
-      .filter((icon) => icon.class || icon.tooltip);
-
-    if (normalizedIcons.some((icon) => !icon.class || !icon.tooltip)) {
-      validationErrors.push('Cada stack precisa de class e tooltip.');
-    }
-
-    if (!form.gallery.length) validationErrors.push('Adicione ao menos 1 imagem de galeria.');
-    if (form.thumbnail.mode === 'logoColor') {
-      if (form.thumbnail.kind !== 'new' || !form.thumbnail.logo?.file) {
-        validationErrors.push('No modo Logo + Cor, envie uma logo para gerar a thumbnail.');
-      }
-      if (!/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(String(form.thumbnail.backgroundColor || ''))) {
-        validationErrors.push('Selecione uma cor de fundo valida para a thumbnail.');
-      }
-      if (
-        !Number.isFinite(Number(form.thumbnail.paddingPercent)) ||
-        Number(form.thumbnail.paddingPercent) < 0 ||
-        Number(form.thumbnail.paddingPercent) > 40
-      ) {
-        validationErrors.push('Padding da logo deve ficar entre 0 e 40%.');
-      }
-    } else if (form.thumbnail.kind === 'none') {
-      validationErrors.push('Selecione uma thumbnail do projeto.');
-    }
-
-    if (![1, 2, 3].includes(Number(form.common.compatibility))) {
-      validationErrors.push('Compatibilidade precisa ser 1, 2 ou 3.');
-    }
-    if (typeof form.common.adult !== 'boolean') {
-      validationErrors.push('Conteudo +18 deve ser verdadeiro ou falso.');
-    }
-    if (typeof form.common.featured !== 'boolean') {
-      validationErrors.push('Projeto destaque deve ser verdadeiro ou falso.');
-    }
-
-    if (
-      Number.isNaN(Number(form.common.developingPorcentage)) ||
-      Number(form.common.developingPorcentage) < 0 ||
-      Number(form.common.developingPorcentage) > 100
-    ) {
-      validationErrors.push('Porcentagem de desenvolvimento deve ficar entre 0 e 100.');
-    }
-
-    return {
-      validationErrors,
-      normalizedIcons,
-      sanitizedLocales,
-    };
-  };
-
-  const saveProject = async () => {
-    setError('');
-    setFeedback('');
-
-    const { validationErrors, normalizedIcons, sanitizedLocales } = validateBeforeSave();
-    if (validationErrors.length > 0) {
-      setError(validationErrors.join(' '));
-      return;
-    }
-
-    const payload = {
-      id: form.id,
-      category: form.category,
-      common: {
-        ...form.common,
-        adult: Boolean(form.common.adult),
-        featured: Boolean(form.common.featured),
-        compatibility: Number(form.common.compatibility),
-        developingPorcentage: Number(form.common.developingPorcentage),
-        icons: normalizedIcons,
-      },
-      locales: sanitizedLocales,
-      galleryPlan: form.gallery.map((image) =>
-        image.kind === 'existing'
-          ? { kind: 'existing', path: image.path }
-          : { kind: 'new', fileId: image.id }
-      ),
-      thumbnailPlan:
-        form.thumbnail.kind === 'existing'
-          ? { kind: 'existing', path: form.thumbnail.path }
-          : {
-              kind: 'new',
-              fileId: form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.id : form.thumbnail.id,
-            },
-      thumbnailConfig:
-        form.thumbnail.mode === 'logoColor'
-          ? {
-              mode: 'logoColor',
-              logoFileId: form.thumbnail.logo.id,
-              backgroundColor: form.thumbnail.backgroundColor,
-              paddingPercent: Number(form.thumbnail.paddingPercent),
-            }
-          : {
-              mode: 'image',
-            },
-    };
-
-    const formData = new FormData();
-    formData.append('payload', JSON.stringify(payload));
-
+  const save = async () => {
+    setNotice(null);
+    const payload = toPayload(form);
+    const body = new FormData();
+    body.append('payload', JSON.stringify(payload));
     form.gallery.forEach((image) => {
-      if (image.kind !== 'new') return;
-      formData.append('galleryFiles', image.file, `${image.id}__${image.file.name}`);
+      if (image.kind === 'new') body.append('galleryFiles', image.file, `${image.id}__${image.file.name}`);
     });
-
-    if (form.thumbnail.kind === 'new') {
-      const thumbnailFile = form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.file : form.thumbnail.file;
-      const thumbnailFileId = form.thumbnail.mode === 'logoColor' ? form.thumbnail.logo.id : form.thumbnail.id;
-      if (!thumbnailFile || !thumbnailFileId) {
-        setError('Arquivo da thumbnail nao encontrado para upload.');
-        return;
-      }
-      formData.append(
-        'thumbnailFiles',
-        thumbnailFile,
-        `${thumbnailFileId}__${thumbnailFile.name}`
-      );
-    }
-
-    const endpoint =
-      mode === 'create'
-        ? '/api/projects'
-        : `/api/projects/${encodeURIComponent(selectedId)}?lang=pt`;
-    const method = mode === 'create' ? 'POST' : 'PUT';
-    const isCreateRequest = method === 'POST';
-
     setIsSaving(true);
     try {
-      const result = await apiRequest(endpoint, {
-        method,
-        body: formData,
+      const result = await apiRequest(mode === 'create' ? '/api/projects' : `/api/projects/${encodeURIComponent(selectedId)}`, {
+        method: mode === 'create' ? 'POST' : 'PUT',
+        body,
       });
-      if (isCreateRequest) {
-        const defaultCategory = meta.categories[0] || '';
-        setCreateDraft(emptyForm(defaultCategory));
-        draftFileSignatureRef.current = '';
+      if (mode === 'create') {
         void clearCreateDraftFromDb();
+        draftSignature.current = '';
+        setDraft(null);
       }
-      setFeedback(result.message || 'Projeto salvo.');
       await refreshProjects();
-      await loadProjectForEdit(result.id || form.id);
-    } catch (requestError) {
-      setError(requestError.message);
+      const data = await apiRequest(`/api/projects/${encodeURIComponent(result.id)}`);
+      const next = formFromProject(data);
+      setMode('edit');
+      setSelectedId(result.id);
+      setMeasurement(data.measurement);
+      replaceForm(next);
+      setSavedPayload(JSON.stringify(toPayload(next)));
+      say(result.warnings?.length ? 'warn' : 'success', result.message, result.warnings || []);
+    } catch (error) {
+      say('error', error.message, (error.errors || []).map(readableIssue));
     } finally {
       setIsSaving(false);
     }
   };
 
-  const openDeleteModal = () => {
-    setDeleteConfirmText('');
-    setIsDeleteModalOpen(true);
+  const reorderFeatured = async (orderedIds) => {
+    setProjects((current) => current.map((p) => (p.featured ? { ...p, order: orderedIds.indexOf(p.id) } : p)));
+    try {
+      await jsonRequest('/api/featured/order', { orderedIds });
+      say('success', 'Ordem dos destaques salva.');
+    } catch (error) {
+      say('error', error.message);
+    } finally {
+      await refreshProjects();
+    }
   };
 
-  const closeDeleteModal = () => {
-    if (isDeleting) return;
-    setIsDeleteModalOpen(false);
-    setDeleteConfirmText('');
-  };
-
-  const deleteProject = async () => {
-    if (!selectedId || mode !== 'edit') return;
-    if (deleteConfirmText !== 'Deletar') return;
-
-    setError('');
-    setFeedback('');
+  const remove = async () => {
+    if (deleteText !== 'Excluir') return;
     setIsDeleting(true);
     try {
-      const result = await apiRequest(`/api/projects/${encodeURIComponent(selectedId)}?lang=pt`, {
-        method: 'DELETE',
-      });
-
-      setIsDeleteModalOpen(false);
-      setDeleteConfirmText('');
+      const result = await apiRequest(`/api/projects/${encodeURIComponent(selectedId)}`, { method: 'DELETE' });
+      deleteRef.current?.close();
+      setDeleteText('');
       await refreshProjects();
-      resetForCreate();
-      setFeedback(result.message || 'Projeto deletado com sucesso.');
-    } catch (requestError) {
-      setError(requestError.message);
+      setMode('create');
+      setSelectedId('');
+      setMeasurement(null);
+      replaceForm(draft || emptyForm());
+      say('success', `${result.message} ${result.removedImages} imagem(ns) apagada(s).`);
+    } catch (error) {
+      deleteRef.current?.close();
+      say('error', error.message);
     } finally {
       setIsDeleting(false);
     }
   };
 
+  const draftCard = draft
+    ? { title: draft.title, cover: draft.gallery[0]?.preview || '' }
+    : null;
+  const featuredCount = projects.filter((p) => p.featured).length;
+  const offlineCount = projects.filter((p) => p.offline).length;
+
   return (
-    <div className="page-shell">
+    <div className="app">
+      <a className="skip" href="#editor">
+        Ir para o formulário
+      </a>
       <header className="topbar">
-        <h1>Portfolio Project Uploader</h1>
-        <div className="topbar-actions">
-          <IconButton icon={faPlus} variant="secondary" onClick={resetForCreate}>
-            Novo projeto
-          </IconButton>
-          <IconButton icon={faRotate} variant="secondary" onClick={loadMetaAndProjects}>
-            Recarregar
-          </IconButton>
+        <div className="topbar__bar">
+          <span className="topbar__brand">
+            <img src={imageUrl('/assets/brand/logo-icone.svg')} alt="" width="54" height="22" />
+            <span className="topbar__name">Portfolio Uploader</span>
+          </span>
+          <span className="topbar__site" title={meta.siteRoot}>
+            {meta.siteRoot ? `site: ${meta.siteRoot.split(/[\\/]/).slice(-2).join('/')}` : 'site não carregado'}
+          </span>
+          <div className="topbar__actions">
+            <IconButton icon={faRotate} variant="glass" onClick={() => confirmLeave() && loadAll()}>
+              Recarregar
+            </IconButton>
+            <IconButton icon={faPlus} variant="primary" onClick={startNew}>
+              Novo projeto
+            </IconButton>
+          </div>
         </div>
       </header>
 
-      {error ? <p className="alert error">{error}</p> : null}
-      {feedback ? <p className="alert success">{feedback}</p> : null}
+      <section className="band lz-band lz-band--brand" aria-label="Resumo do portfólio">
+        <svg className="lz-band__mesh" aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 1440 200">
+          {Array.from({ length: 24 }, (_, i) => (
+            <path key={`v${i}`} d={`M${i * 64} 0V200`} />
+          ))}
+          {Array.from({ length: 5 }, (_, i) => (
+            <path key={`h${i}`} d={`M0 ${i * 50}H1440`} />
+          ))}
+        </svg>
+        <div className="lz-band__content band__content">
+          <h1 className="lz-section-title lz-section-title--on-brand type-heading">
+            <span className="lz-section-title__one">Projetos do</span>
+            <span className="lz-section-title__two">portfólio</span>
+          </h1>
+          <dl className="band__stats">
+            <div>
+              <dt>projetos</dt>
+              <dd>{projects.length}</dd>
+            </div>
+            <div>
+              <dt>destaques</dt>
+              <dd>{featuredCount}</dd>
+            </div>
+            <div>
+              <dt>fora do ar</dt>
+              <dd>{offlineCount}</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
 
-      <main className="layout">
-        <aside className="project-list-panel">
-          <div className="panel-header">
-            <h2>Projetos</h2>
-            <p>{projects.length} itens</p>
-          </div>
+      <main className="workspace">
+        <ProjectList
+          projects={projects}
+          draft={draftCard}
+          selectedId={mode === 'edit' ? selectedId : ''}
+          isDraftActive={mode === 'create' && Boolean(draft)}
+          isLoading={isLoading}
+          onSelect={openProject}
+          onSelectDraft={startNew}
+          onReorderFeatured={reorderFeatured}
+        />
 
-          <input
-            className="input"
-            type="search"
-            placeholder="Buscar por titulo, id ou slug"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
+        <section className="editor" id="editor" aria-labelledby="editor-title">
+          <header className="editor__head">
+            <div>
+              <p className="editor__kicker">{mode === 'create' ? 'Novo projeto' : 'Editando'}</p>
+              <h2 className="editor__title type-heading" id="editor-title">
+                {form.title || (mode === 'create' ? 'Sem nome ainda' : selectedId)}
+              </h2>
+              {form.id ? <p className="editor__path">/cases/{form.id}/</p> : null}
+            </div>
+            <div className="editor__head-actions">
+              {mode === 'edit' ? (
+                <a className="icon-btn icon-btn-ghost" href={`${SITE_URL}/cases/${form.id}/`} target="_blank" rel="noreferrer">
+                  <FontAwesomeIcon icon={faArrowUpRightFromSquare} className="icon-btn-glyph" />
+                  <span>Ver no site</span>
+                </a>
+              ) : draft ? (
+                <IconButton icon={faTrash} variant="ghost" onClick={discardDraft}>
+                  Apagar rascunho
+                </IconButton>
+              ) : null}
+            </div>
+          </header>
+
+          {notice ? (
+            <div className="notice" data-tone={notice.tone} role={notice.tone === 'error' ? 'alert' : 'status'}>
+              <FontAwesomeIcon icon={notice.tone === 'success' ? faCircleCheck : faTriangleExclamation} className="notice__icon" />
+              <div>
+                <p>{notice.message}</p>
+                {notice.list?.length ? (
+                  <ul>
+                    {notice.list.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <IconButton icon={faXmark} iconOnly variant="ghost" ariaLabel="Fechar aviso" onClick={() => setNotice(null)} />
+            </div>
+          ) : null}
+
+          <ProjectForm
+            form={form}
+            mode={mode}
+            meta={meta}
+            measurement={measurement}
+            issues={issues}
+            checking={checking}
+            onField={onField}
+            onText={onText}
+            gallery={{ onAdd: addGalleryFiles, onRemove: removeImage, onMove: moveImage, overlap, onOverlapChange: setOverlap, busyText }}
+            texts={{
+              onTranslate: translate,
+              isTranslating,
+              onOpenConsole: openConsole,
+            }}
           />
 
-          <select
-            className="input"
-            value={categoryFilter}
-            onChange={(event) => setCategoryFilter(event.target.value)}
-          >
-            <option value="all">Todas as categorias</option>
-            {meta.categories.map((category) => (
-              <option key={category} value={category}>
-                {category}
-              </option>
-            ))}
-          </select>
-
-          <div className="project-cards">
-            {canDragReorderProjects ? (
-              <p className="muted reorder-hint">
-                Arraste os cards para reordenar a categoria "{categoryFilter}".
-              </p>
-            ) : (
-              <p className="muted reorder-hint">
-                Para reordenar, selecione uma categoria especifica e limpe a busca.
-              </p>
-            )}
-            {isLoading ? <p>Carregando...</p> : null}
-            {!isLoading && !filteredProjects.length ? <p>Nenhum projeto encontrado.</p> : null}
-            {filteredProjects.map((project) => (
-              <button
-                key={`${project.isDraft ? 'draft' : 'project'}-${project.category}-${project.id}-${project.index}`}
-                type="button"
-                draggable={!project.isDraft && canDragReorderProjects && !isReorderingProjects}
-                className={`project-card ${
-                  project.isDraft ? (mode === 'create' ? 'active' : '') : selectedId === project.id ? 'active' : ''
-                } ${
-                  draggingProjectId === project.id ? 'is-dragging' : ''
-                }`}
-                onClick={() => {
-                  if (project.isDraft) {
-                    restoreCreateDraft();
-                    return;
-                  }
-                  loadProjectForEdit(project.id);
-                }}
-                onDragStart={(event) => {
-                  if (project.isDraft || !canDragReorderProjects || isReorderingProjects) {
-                    event.preventDefault();
-                    return;
-                  }
-                  setDraggingProjectId(project.id);
-                  event.dataTransfer.effectAllowed = 'move';
-                  event.dataTransfer.setData('text/plain', project.id);
-                }}
-                onDragOver={(event) => {
-                  if (!canDragReorderProjects || isReorderingProjects) return;
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'move';
-                }}
-                onDrop={async (event) => {
-                  if (project.isDraft || !canDragReorderProjects || isReorderingProjects) return;
-                  event.preventDefault();
-                  const fromId = event.dataTransfer.getData('text/plain') || draggingProjectId;
-                  const reorderedIds = reorderProjectsInCategory(fromId, project.id);
-                  setDraggingProjectId('');
-                  if (reorderedIds) {
-                    await persistProjectOrder(reorderedIds);
-                  }
-                }}
-                onDragEnd={() => setDraggingProjectId('')}
-              >
-                <img
-                  src={
-                    project.image
-                      ? String(project.image).startsWith('blob:')
-                        ? project.image
-                        : toAssetPreviewUrl(project.image)
-                      : ''
-                  }
-                  alt={project.title}
-                />
-                <div className="project-card-body">
-                  <strong>{project.title}</strong>
-                  <small>
-                    {project.category} {project.isDraft ? '· rascunho' : ''}
-                  </small>
-                </div>
-                <div className="project-card-edit project-drag-indicator" aria-hidden="true">
-                  <span className="project-drag-glyph">
-                    <IconButton
-                      icon={faGripVertical}
-                      iconOnly
-                      ariaLabel={`Arrastar imagem ${project.id}`}
-                      className="drag-handle-btn"
-                    /> 
-                    </span>
-                </div>
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="editor-panel">
-          <div className="panel-header">
-            <h2>{mode === 'create' ? 'Criar projeto' : `Editar: ${selectedId}`}</h2>
-          </div>
-
-          <div className="form-grid">
-            <label>
-              Categoria
-              <select
-                className="input"
-                value={form.category}
-                onChange={(event) =>
-                  setForm((current) => ({
-                    ...current,
-                    category: event.target.value,
-                  }))
-                }
-              >
-                <option value="">Selecione</option>
-                {meta.categories.map((category) => (
-                  <option key={category} value={category}>
-                    {category}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              ID (imutavel)
-              <input className="input" value={form.id || ''} readOnly />
-            </label>
-
-            <label>
-              Data inicial (MM/YYYY)
-              <input
-                className="input"
-                value={form.common.initialDate}
-                onChange={(event) => updateCommon('initialDate', event.target.value)}
-              />
-            </label>
-
-            <label>
-              Data final (MM/YYYY)
-              <input
-                className="input"
-                value={form.common.endDate}
-                onChange={(event) => updateCommon('endDate', event.target.value)}
-              />
-            </label>
-
-            <label>
-              URL do projeto
-              <input
-                className="input"
-                value={form.common.projectUrlLink}
-                onChange={(event) => updateCommon('projectUrlLink', event.target.value)}
-              />
-            </label>
-
-            <label>
-              URL do LinkedIn
-              <input
-                className="input"
-                value={form.common.linkedinUrlLink}
-                onChange={(event) => updateCommon('linkedinUrlLink', event.target.value)}
-              />
-            </label>
-
-            <label>
-              URL do GitHub
-              <input
-                className="input"
-                value={form.common.githubUrlLink}
-                onChange={(event) => updateCommon('githubUrlLink', event.target.value)}
-              />
-            </label>
-
-            <label>
-              Compatibilidade (1-3)
-              <select
-                className="input"
-                value={form.common.compatibility}
-                onChange={(event) => updateCommon('compatibility', Number(event.target.value))}
-              >
-                <option value={1}>1 · Mobile</option>
-                <option value={2}>2 · Mobile + Tablet</option>
-                <option value={3}>3 · Mobile + Tablet + Desktop</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="inline-controls">
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={Boolean(form.common.developed)}
-                onChange={(event) => updateCommon('developed', event.target.checked)}
-              />
-              Projeto concluido
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={Boolean(form.common.adult)}
-                onChange={(event) => updateCommon('adult', event.target.checked)}
-              />
-              Conteudo +18
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={Boolean(form.common.featured)}
-                onChange={(event) => updateCommon('featured', event.target.checked)}
-              />
-              Projeto destaque?
-            </label>
-
-            <label>
-              Progresso (%)
-              <input
-                className="input short"
-                type="number"
-                min={0}
-                max={100}
-                value={form.common.developingPorcentage}
-                onChange={(event) =>
-                  updateCommon('developingPorcentage', Number(event.target.value || 0))
-                }
-              />
-            </label>
-          </div>
-
-          <section className="block">
-            <div className="block-header">
-              <h3>Stacks / Tecnologias</h3>
-              <IconButton icon={faPlus} variant="secondary" onClick={addCustomIcon}>
-                Stack custom
-              </IconButton>
-            </div>
-
-            <div className="icon-pills">
-              {meta.knownIcons.map((iconClass) => (
-                <button key={iconClass} type="button" className="pill" onClick={() => addKnownIcon(iconClass)}>
-                  <StackIcon key={`known-${iconClass}`} iconClass={iconClass} alt={iconClass} />
-                  <span>{iconClass}</span>
-                </button>
-              ))}
-            </div>
-
-            <div className="icon-list">
-              {form.common.icons.map((icon, index) => (
-                <div key={`icon-${index}`} className="icon-row">
-                  <div className="icon-preview">
-                    <StackIcon key={`preview-${icon.class}-${index}`} iconClass={icon.class} alt={icon.class || 'stack'} />
-                  </div>
-                  <input
-                    className="input"
-                    placeholder="class"
-                    value={icon.class}
-                    onChange={(event) => updateIcon(index, 'class', event.target.value)}
-                  />
-                  <input
-                    className="input"
-                    placeholder="tooltip"
-                    value={icon.tooltip}
-                    onChange={(event) => updateIcon(index, 'tooltip', event.target.value)}
-                  />
-                  <IconButton
-                    icon={faTrash}
-                    variant="danger"
-                    iconOnly
-                    ariaLabel="Remover stack"
-                    onClick={() => removeIcon(index)}
-                  />
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="block">
-            <div className="block-header">
-              <h3>Conteudo por idioma</h3>
-              <div className="locale-actions">
-                <IconButton icon={faTerminal} variant="back" iconOnly onClick={() => setIsConsoleOpen(true)}></IconButton>
-                <IconButton
-                  icon={faWandMagicSparkles}
-                  variant="primary"
-                  className={isTranslating ? 'is-loading' : ''}
-                  onClick={translatePtToOtherLocales}
-                  disabled={isTranslating}
-                >
-                  {isTranslating ? 'Traduzindo...' : 'Traduzir com IA'}
+          <div className="savebar">
+            <p className="savebar__status" aria-live="polite">
+              {issueCount
+                ? `${issueCount} ${issueCount === 1 ? 'ponto' : 'pontos'} fora do padrão: o site não publica assim.`
+                : isDirty
+                  ? 'Alterações não salvas.'
+                  : mode === 'create'
+                    ? 'Rascunho guardado neste navegador.'
+                    : 'Tudo salvo.'}
+            </p>
+            <div className="savebar__actions">
+              {mode === 'edit' ? (
+                <IconButton icon={faTrash} variant="danger" onClick={() => deleteRef.current?.showModal()}>
+                  Excluir
                 </IconButton>
-              </div>
-            </div>
-
-            <div className="locale-tabs">
-              {DEFAULT_LOCALES.map((locale) => (
-                <button
-                  key={locale}
-                  type="button"
-                  className={`locale-tab ${activeLocale === locale ? 'active' : ''}`}
-                  onClick={() => setActiveLocale(locale)}
-                >
-                  {locale.toUpperCase()}
-                </button>
-              ))}
-            </div>
-
-            <div className="locale-editor">
-              <label>
-                Titulo ({activeLocale.toUpperCase()})
-                <input
-                  className="input"
-                  value={form.locales[activeLocale]?.title || ''}
-                  onChange={(event) => updateLocaleField(activeLocale, 'title', event.target.value)}
-                />
-              </label>
-
-              <div className="field-block">
-                <span>Descricao HTML ({activeLocale.toUpperCase()})</span>
-                <RichTextEditor
-                  value={form.locales[activeLocale]?.description || ''}
-                  onChange={(nextHtml) => updateLocaleField(activeLocale, 'description', nextHtml)}
-                />
-              </div>
-            </div>
-          </section>
-
-          <section className="block">
-            <div className="block-header">
-              <h3>Thumbnail</h3>
-              <IconButton icon={faTrash} variant="danger" onClick={clearThumbnail}>
-                Limpar
+              ) : null}
+              <IconButton icon={faFloppyDisk} variant="primary" onClick={save} disabled={isSaving || Boolean(busyText)}>
+                {isSaving ? 'Salvando…' : mode === 'create' ? 'Criar projeto' : 'Salvar alterações'}
               </IconButton>
             </div>
-
-            <label className="thumb-mode-toggle">
-              <input
-                type="checkbox"
-                checked={form.thumbnail.mode === 'logoColor'}
-                onChange={(event) => toggleLogoColorThumbnailMode(event.target.checked)}
-              />
-              Usar Logo + Cor (gerar thumb automaticamente)
-            </label>
-
-            {form.thumbnail.mode === 'logoColor' ? (
-              <div className="thumb-logo-mode">
-                <FileUploadDropzone
-                  id="thumbnail-logo-upload"
-                  accept="image/*,.svg"
-                  title="Arraste e solte a logo"
-                  browseLabel="Selecionar logo"
-                  helperText="PNG, SVG ou WEBP"
-                  onFilesSelected={(files) => setLogoThumbnailFile(files?.[0])}
-                />
-
-                <div className="thumb-logo-controls">
-                  <label className="thumb-color-field">
-                    Cor de fundo
-                    <input
-                      className="thumb-color-input"
-                      type="color"
-                      value={form.thumbnail.backgroundColor}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          thumbnail: {
-                            ...current.thumbnail,
-                            backgroundColor: event.target.value,
-                          },
-                        }))
-                      }
-                    />
-                  </label>
-                  <label className="thumb-padding-field">
-                    Padding da logo (%)
-                    <input
-                      className="input thumb-padding-input"
-                      type="number"
-                      min={0}
-                      max={40}
-                      value={form.thumbnail.paddingPercent}
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          thumbnail: {
-                            ...current.thumbnail,
-                            paddingPercent: Math.max(0, Math.min(40, Number(event.target.value || 0))),
-                          },
-                        }))
-                      }
-                    />
-                  </label>
-                </div>
-              </div>
-            ) : (
-              <FileUploadDropzone
-                id="thumbnail-upload"
-                accept="image/*"
-                title="Arraste e solte a thumbnail"
-                browseLabel="Procurar"
-                helperText="PNG, JPG ou WEBP"
-                onFilesSelected={(files) => setNewThumbnail(files?.[0])}
-              />
-            )}
-
-            {form.thumbnail.preview ? (
-              <img className="thumb-preview" src={form.thumbnail.preview} alt="Preview thumbnail" />
-            ) : (
-              <p className="muted">Nenhuma thumbnail selecionada.</p>
-            )}
-          </section>
-
-          <section className="block">
-            <div className="block-header">
-              <h3>Galeria de imagens</h3>
-              <label className="split-overlap-control">
-                Overlap (px)
-                <input
-                  className="input split-overlap-input"
-                  type="number"
-                  min={0}
-                  max={1079}
-                  value={gallerySplitOverlap}
-                  onChange={(event) =>
-                    setGallerySplitOverlap(
-                      Math.max(0, Math.min(1079, Number(event.target.value || DEFAULT_SPLIT_OVERLAP)))
-                    )
-                  }
-                />
-              </label>
-            </div>
-
-            <FileUploadDropzone
-              id="gallery-upload"
-              accept="image/*,.pdf,application/pdf"
-              multiple
-              title="Arraste e solte imagens ou PDFs da galeria"
-              browseLabel="Escolher arquivos"
-              helperText="PDFs viram PNG por pagina e depois passam pelo split automatico (>1080px)"
-              onFilesSelected={addGalleryFiles}
-            />
-
-            {isSplittingGallery ? <p className="split-indicator">{splitProgressText || 'Splitting...'}</p> : null}
-
-            <div className="gallery-list">
-              {form.gallery.map((image, index) => (
-                <article
-                  key={image.id}
-                  className={`gallery-item ${draggingGalleryId === image.id ? 'is-dragging' : ''}`}
-                  draggable
-                  onDragStart={(event) => {
-                    setDraggingGalleryId(image.id);
-                    event.dataTransfer.effectAllowed = 'move';
-                    event.dataTransfer.setData('text/plain', image.id);
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'move';
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const fromId = event.dataTransfer.getData('text/plain') || draggingGalleryId;
-                    moveGalleryImageByDrag(fromId, image.id);
-                    setDraggingGalleryId('');
-                  }}
-                  onDragEnd={() => setDraggingGalleryId('')}
-                >
-                  <span className="gallery-drag-handle" aria-hidden="true">
-                    <IconButton
-                      icon={faGripVertical}
-                      iconOnly
-                      ariaLabel={`Arrastar imagem ${index + 1}`}
-                      className="drag-handle-btn"
-                    />
-                  </span>
-                  <img src={image.preview} alt={image.name || `imagem-${index + 1}`} />
-                  <div className="gallery-meta">
-                    <strong>{image.name || image.path}</strong>
-                    <small>{image.kind === 'new' ? 'nova' : 'existente'}</small>
-                  </div>
-                  <div className="gallery-actions">
-                    <IconButton
-                      icon={faTrash}
-                      variant="danger"
-                      iconOnly
-                      ariaLabel="Remover imagem"
-                      onClick={() => removeGalleryImage(image.id)}
-                    />
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <div className="submit-row">
-            {mode === 'edit' && selectedId ? (
-              <IconButton icon={faTrash} variant="danger" onClick={openDeleteModal}>
-                Deletar
-              </IconButton>
-            ) : (
-              <span />
-            )}
-            <IconButton
-              icon={faFloppyDisk}
-              variant="primary"
-              disabled={isSaving || isSplittingGallery}
-              onClick={saveProject}
-            >
-              {isSaving ? 'Salvando...' : mode === 'create' ? 'Criar projeto' : 'Salvar edicao'}
-            </IconButton>
           </div>
         </section>
       </main>
 
-      {isDeleteModalOpen ? (
-        <div className="delete-modal-backdrop" role="presentation" onClick={closeDeleteModal}>
-          <div
-            className="delete-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Confirmar exclusao de projeto"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <h3>Confirmar exclusao</h3>
-            <p>
-              Esta acao e irreversivel. O projeto sera removido dos JSONs (PT/EN/ES) e os assets
-              relacionados (thumb + pasta de imagens) serao apagados.
-            </p>
-            <label className="delete-confirm-field">
-              Digite exatamente <strong>Deletar</strong> para continuar:
-              <input
-                className="input"
-                value={deleteConfirmText}
-                onChange={(event) => setDeleteConfirmText(event.target.value)}
-                placeholder="Deletar"
-              />
-            </label>
-            <div className="delete-modal-actions">
-              <IconButton variant="secondary" onClick={closeDeleteModal} disabled={isDeleting}>
-                Cancelar
-              </IconButton>
-              <IconButton
-                icon={faTrash}
-                variant="danger"
-                onClick={deleteProject}
-                disabled={deleteConfirmText !== 'Deletar' || isDeleting}
-              >
-                {isDeleting ? 'Deletando...' : 'Confirmar Deletar'}
-              </IconButton>
-            </div>
-          </div>
+      <dialog className="sheet console" aria-labelledby="console-title">
+        <header className="sheet__head">
+          <h2 id="console-title" className="type-subheading">
+            Tradução <span className="console__status" data-status={consoleStatus}>{{ idle: 'parada', running: 'rodando', success: 'concluída', error: 'com erro' }[consoleStatus]}</span>
+          </h2>
+          <IconButton icon={faXmark} iconOnly variant="ghost" ariaLabel="Fechar" onClick={(event) => event.currentTarget.closest('dialog').close()} />
+        </header>
+        <div className="console__body" ref={consoleRef}>
+          {consoleLogs.length ? (
+            consoleLogs.map((entry) => (
+              <p key={entry.id} className="console__line" data-level={entry.level}>
+                <time>{entry.time}</time> {entry.message}
+              </p>
+            ))
+          ) : (
+            <p className="console__line">Sem registros. O progresso da tradução aparece aqui.</p>
+          )}
         </div>
-      ) : null}
+      </dialog>
 
-      {isConsoleOpen ? (
-        <div className="llm-console-backdrop" role="presentation" onClick={() => setIsConsoleOpen(false)}>
-          <div
-            className={`llm-console-modal status-${consoleStatus}`}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Console da traducao"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="llm-console-header">
-              <strong>OLLAMA CONSOLE</strong>
-              <div className="llm-console-header-actions">
-                <span className={`llm-console-badge status-${consoleStatus}`}>
-                  {consoleStatus === 'running'
-                    ? 'RUNNING'
-                    : consoleStatus === 'success'
-                      ? 'SUCCESS'
-                      : consoleStatus === 'error'
-                        ? 'ERROR'
-                        : 'IDLE'}
-                </span>
-                <button
-                  type="button"
-                  className="llm-console-close"
-                  onClick={() => setIsConsoleOpen(false)}
-                >
-                  EXIT
-                </button>
-              </div>
-            </div>
-            <div className="llm-console-body" ref={consoleBodyRef}>
-              {consoleLogs.length === 0 ? (
-                <p className="llm-console-line muted">Aguardando logs...</p>
-              ) : (
-                consoleLogs.map((entry) => (
-                  <p key={entry.id} className={`llm-console-line level-${entry.level || 'info'}`}>
-                    <span>[{entry.timestamp}]</span> {entry.message}
-                  </p>
-                ))
-              )}
-            </div>
-          </div>
+      <dialog className="sheet" ref={deleteRef} aria-labelledby="delete-title" onClose={() => setDeleteText('')}>
+        <header className="sheet__head">
+          <h2 id="delete-title" className="type-subheading">
+            Excluir {form.title}?
+          </h2>
+        </header>
+        <p>O projeto sai do site e as imagens dele são apagadas da pasta do site. Não dá para desfazer pelo uploader.</p>
+        <label className="field">
+          <span className="field__label">
+            Digite <strong>Excluir</strong> para confirmar
+          </span>
+          <input className="input" value={deleteText} onChange={(event) => setDeleteText(event.target.value)} autoComplete="off" />
+        </label>
+        <div className="sheet__actions">
+          <IconButton variant="outline" onClick={() => deleteRef.current?.close()} disabled={isDeleting}>
+            Cancelar
+          </IconButton>
+          <IconButton icon={faTrash} variant="danger" onClick={remove} disabled={deleteText !== 'Excluir' || isDeleting}>
+            {isDeleting ? 'Excluindo…' : 'Excluir projeto'}
+          </IconButton>
         </div>
-      ) : null}
+      </dialog>
     </div>
   );
 }

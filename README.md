@@ -1,131 +1,108 @@
-# Portfolio Project Uploader (Local)
+# Portfolio Uploader (local)
 
-Mini app local para criar/editar projetos do portfolio com:
-- leitura e escrita dos JSON reais (`pt`, `en`, `es`)
-- upload multiplo de imagens com ordenacao por drag and drop
-- split automatico de imagens altas em frames 1920x1080 (overlap configuravel)
-- suporte a PDF na galeria (converte cada pagina para PNG e aplica split quando necessario)
-- carregamento dinamico do motor de PDF (so quando o usuario envia `.pdf`)
-- autosave de rascunho de criacao (rollback de formulario em refresh/fechamento)
-- card de rascunho "em desenvolvimento" na lista de projetos para retomar edicao
-- conversao/otimizacao de novos uploads para WebP (thumb + galeria)
-- validacao de campos obrigatorios e unicidade de id
-- suporte aos flags `adult` (+18) e `featured` (projeto em destaque)
-- descricao com editor rich text (toolbar + modo HTML)
-- traducao automatica PT -> EN/ES com IA local (Ollama)
-- copia de imagens para os diretorios reais usados pelo portfolio em producao
-- exclusao segura de projeto com confirmacao forte
+App local para criar e editar os cases do portfólio (lorenzodacunha.com.br). Ele lê e grava o conteúdo do próprio
+site em Astro: `site/src/data/projects.json` (um arquivo, com inglês e espanhol nos campos `_en` e `_es`) e as
+imagens em `site/public/assets/projects/`. Depois de salvar, o commit e o deploy na Vercel são feitos no repositório
+do site.
 
-## 1) Configuracao
+O que ele faz:
+- lista os 43+ projetos como um catálogo, com busca e filtros (lojas, landing pages, destaques, fora do ar, fora do padrão)
+- cria e edita projetos com os campos que o site mostra: nome, endereço do case (`/cases/<id>/`), tipo, plataforma,
+  período, link da loja, tecnologias, imagens e textos nos três idiomas
+- **Loja fora do ar** (`offline`): o botão "Ver loja no ar" fica bloqueado com a dica "Esta loja não está mais
+  disponível."; o link fica só guardado
+- **Destaque** (`featured` e `order`): entra no trilho "Cases em produção"; a ordem muda arrastando no filtro Destaques
+- **Parceria** (`partner` e "Minha atuação" nos três idiomas): parceiros vêm de `profile.json`
+- **Desempenho** (`performance`): liga o painel do Lighthouse no case; nunca em loja fora do ar. Mostra se há medição
+  guardada (`performance.json`); para medir, rode `npm run measure` no site
+- **Conteúdo +18** (`adult`) e **Fundo do card** (`tone`)
+- período por mês de início e de fim: o texto sai nos três idiomas ("set. a dez. de 2023", "Sep to Dec 2023",
+  "sept. a dic. de 2023") e o `sort` ordena o catálogo
+- imagens: arrastar capturas ou PDF; cada página de PDF vira imagem e imagens altas viram quadros 1920 × 1080 com
+  sobreposição; a ordem muda arrastando e a primeira é a capa do card. Ao salvar, cada imagem nova vira
+  `<id>-<n>.webp` (1280 px) e `<id>-<n>-640.webp` (cards)
+- textos: editor só com o que o padrão aceita (seções, parágrafos, negrito, itálico, listas), com "Inserir seção"
+  nos nomes fixos de cada idioma e modo HTML
+- **padrão das descrições ao vivo**: o servidor confere os textos com `site/scripts/description-rules.mjs`, as mesmas
+  regras do build do site. Um projeto fora do padrão não salva (o build do site também não passaria)
+- tradução PT → EN e ES com IA local (Ollama), com console de progresso; os títulos de seção saem nos nomes fixos
+- rascunho do projeto novo guardado no navegador (IndexedDB), com as imagens ainda não salvas
+- exclusão com confirmação digitada; imagens que o mosaico da home (`home.json`) usa nunca são apagadas, e um projeto
+  com imagem no mosaico só sai depois de trocar o mosaico
+
+## 1) Configuração
+
+O uploader fica ao lado do site: `clients/lorenzo/uploader` e `clients/lorenzo/site`. Se a pasta do site for
+outra, ajuste `SITE_ROOT`.
 
 ### API (Express)
 1. Entre em `server`.
-2. Copie `.env.example` para `.env`.
-3. Ajuste `PORTFOLIO_ROOT` para a raiz do projeto de producao, se necessario.
+2. Copie `.env.example` para `.env` (o padrão já aponta para `../../site`).
 
-Variaveis principais:
-- `PORTFOLIO_ROOT`: raiz do portfolio de producao
-- `PROJECTS_PT_PATH`, `PROJECTS_EN_PATH`, `PROJECTS_ES_PATH`: arquivos JSON reais
-- `PROJECTS_ASSETS_DIR`: base de imagens de projetos
-- `PROJECTS_THUMBS_DIR`: pasta de thumbs
-- `THUMB_TARGET_WIDTH`: largura final da thumb otimizada (default `248`)
-- `THUMB_CARD_ASPECT_RATIO`: proporcao do card para gerar thumb sem distorcer (default `195/113`)
-- `GALLERY_MAX_WIDTH`: largura maxima para imagens de galeria (sem upscale)
-- `WEBP_QUALITY`: qualidade WebP aplicada nos novos uploads
-- `ENABLE_INLINE_STYLE`: permite atributo `style` no HTML sanitizado da descricao
-- `OLLAMA_URL`: endpoint local do Ollama (ex.: `http://localhost:11434`)
-- `OLLAMA_MODEL`: modelo preferencial para traducao (fallback automatico para modelo instalado)
-- `OLLAMA_TIMEOUT_MS`: timeout de chamada ao Ollama
+Variáveis principais:
+- `SITE_ROOT`: pasta do site (relativa a `server/` ou absoluta)
+- `PROJECTS_FILE`, `PROFILE_FILE`, `HOME_FILE`, `PERFORMANCE_FILE`: arquivos de conteúdo dentro do site
+- `RULES_FILE`: as regras do padrão das descrições (`scripts/description-rules.mjs`)
+- `ASSETS_DIR`: pasta das imagens dos cases
+- `IMAGE_WIDTH`, `IMAGE_SMALL_WIDTH`, `WEBP_QUALITY`: tamanhos e qualidade das imagens novas
+- `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_MS`: tradução local
 
 ### Web (Vite + React)
-Opcionalmente crie `web/.env`:
+Opcionalmente crie `web/.env` a partir de `web/.env.example`:
 
 ```env
 VITE_API_URL=http://localhost:3333
+VITE_SITE_URL=http://localhost:4321
 ```
 
 ## 2) Rodar em desenvolvimento
 
 ### Terminal 1 (API)
 ```bash
-cd "Portfolio Project Uploader/server"
+cd uploader/server
 npm run dev
 ```
 
 ### Terminal 2 (Web)
 ```bash
-cd "Portfolio Project Uploader/web"
+cd uploader/web
+npm install
 npm run dev
 ```
 
-App web: `http://localhost:5173`
+App: `http://localhost:5173`. Para o link "Ver no site", rode também `npm run dev` em `site/`.
 
 ## 3) Como usar
 
-1. Abra a tela e use a coluna esquerda para buscar/filtrar projetos existentes.
-   - para reordenar cards, selecione uma categoria especifica (sem busca) e arraste os projetos.
-   - quando houver rascunho de criacao, ele aparece como card "rascunho" na lista.
-2. Clique em um card para editar ou em **Novo Projeto** para criar.
-3. Preencha todos os campos:
-   - categoria
-   - `id` (gerado automaticamente, somente leitura)
-   - datas, links e flags (`Projeto concluido`, `Conteudo +18`, `Projeto destaque?`)
-   - stacks/tecnologias (`class` + `tooltip`)
-   - titulo/descricao para `pt`, `en`, `es`
-4. Na thumbnail, escolha o modo:
-   - **Thumb por imagem**: upload normal (pipeline otimiza para tamanho final pequeno).
-   - **Logo + Cor**: envie uma logo, escolha cor e padding; o backend gera a thumb final automaticamente no save.
-5. Faca upload das imagens da galeria (JPG/PNG/WEBP ou PDF).
-   - imagens altas (>1080px) sao divididas automaticamente em frames 1920x1080 no front.
-   - PDFs sao convertidos em PNG por pagina antes do split.
-   - o parser de PDF e carregado sob demanda apenas quando um PDF e enviado.
-   - o split nao converte para webp; a conversao final ocorre somente ao salvar no backend.
-6. Reordene as imagens da galeria por drag and drop.
-7. Clique em **Traduzir com IA** para preencher EN/ES a partir do PT.
-   - Use o botao **Console** para abrir o terminal de progresso da LLM.
-8. Edite descricao no rich text (atalhos: `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, `Ctrl/Cmd+U`, `Ctrl/Cmd+K`, undo/redo).
-9. Em modo edicao, use **Deletar** para remover projeto (digite `Deletar` para confirmar).
-10. Clique em **Criar projeto** ou **Salvar edicao**.
-
-## 3.1) Rascunho e rollback de formulario
-
-- Em modo **Criar projeto**, o app salva automaticamente um rascunho local do formulario.
-- A persistencia usa **IndexedDB** (snapshot + arquivos binarios), nao apenas texto.
-- Se recarregar a pagina ou fechar/abrir o navegador, o rascunho e restaurado.
-- O rascunho aparece nos `project-cards` como item em desenvolvimento e pode ser reaberto a qualquer momento.
-- O botao **Novo projeto** limpa o rascunho atual e inicia um rascunho novo (reset completo).
-- Uploads locais nao salvos no backend (thumb/logo/galeria) tambem sao restaurados quando possivel.
+1. Escolha um projeto na coluna da esquerda ou clique em **Novo projeto**.
+2. Preencha **Projeto**: o nome gera o endereço do case (`/cases/<id>/`), que não muda depois de criado.
+3. **Loja no ar**, **Vitrine**, **Parceria**, **Desempenho** e **Tecnologias** conforme o case.
+4. **Imagens**: arraste capturas ou PDFs; reordene arrastando.
+5. **Textos**: escreva em português, clique em **Traduzir para EN e ES** e revise as duas abas. O quadro abaixo do
+   editor mostra o que está fora do padrão em cada idioma.
+6. **Criar projeto** ou **Salvar alterações**. Depois, no site: `npm run build` para conferir, commit e deploy.
 
 ## 4) Endpoints da API
 
-- `GET /api/meta`
-- `GET /api/projects?lang=pt`
-- `POST /api/projects/reorder?lang=pt` (persistencia da ordem dos cards por categoria, via `orderedIds`)
-- `GET /api/projects/:id?lang=pt`
-- `POST /api/projects` (multipart + `payload`)
-- `PUT /api/projects/:id?lang=pt` (multipart + `payload`)
-- `DELETE /api/projects/:id?lang=pt` (remove JSON + assets relacionados)
-- `POST /api/translate` (JSON, IA local via Ollama)
-- `POST /api/translate/stream` (NDJSON, progresso em tempo real da LLM)
-- `GET /api/image?path=assets/...` (preview)
+- `GET /api/health`
+- `GET /api/meta` (parceiros, plataformas e tecnologias em uso, seções do padrão por idioma)
+- `GET /api/projects` (lista do catálogo)
+- `GET /api/projects/:id`
+- `POST /api/projects` (multipart: `payload` + `galleryFiles`)
+- `PUT /api/projects/:id` (multipart: `payload` + `galleryFiles`)
+- `DELETE /api/projects/:id`
+- `POST /api/check` (confere os textos no padrão, sem salvar)
+- `POST /api/featured/order` (ordem do trilho de destaques, `orderedIds`)
+- `POST /api/translate/stream` (NDJSON, progresso da tradução)
+- `GET /api/image?src=/assets/...` (imagens do site para as prévias)
 
-## 5) Regras de validacao implementadas
+## 5) Regras de validação
 
-- campos obrigatorios do schema real do portfolio
-- ao menos 1 stack e ao menos 1 imagem de galeria
-- compatibilidade em `1|2|3`
-- progresso em `0..100`
-- `id` unico e imutavel por projeto
-- categoria precisa existir nos JSONs reais
-- paths de arquivos sempre resolvidos dentro da raiz configurada do portfolio
-- sanitizacao de `description` no backend (remocao de conteudo perigoso, com whitelist)
-
-## 6) Traducao com IA local (Ollama)
-
-1. Instale e rode o Ollama localmente.
-2. Garanta que existe ao menos 1 modelo instalado (`ollama pull <modelo>`).
-3. Configure `OLLAMA_URL` e `OLLAMA_MODEL` no `server/.env`.
-4. Para `llama3.1:70b`, recomenda-se aumentar `OLLAMA_TIMEOUT_MS` (ex.: `300000` ou mais).
-5. No uploader, preencha PT e clique em **Traduzir com IA**.
-6. Abra o **Console** para acompanhar o andamento da geracao e validacao.
-7. EN/ES sao preenchidos automaticamente e continuam editaveis para ajuste.
+- endereço do case só com letras minúsculas, números e hífen, único e imutável
+- nome, plataforma, tipo, período (início antes do fim), ao menos uma tecnologia e uma imagem
+- link da loja vazio ou com `http(s)://`; "fora do ar" só com link
+- parceria exige "Minha atuação" nos três idiomas
+- textos no padrão das descrições do site (seções fixas e na ordem, só `p`, `h2`, `ul`, `ol`, `li`, `strong` e `em`,
+  sem travessão nem emoji, mesma estrutura nos três idiomas, resumo em texto puro)
+- um texto que ninguém mexeu fica exatamente como estava; salvar sem mudanças não altera o `projects.json`
+- caminhos sempre dentro da pasta do site

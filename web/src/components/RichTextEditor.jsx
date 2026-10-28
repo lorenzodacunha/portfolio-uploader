@@ -1,109 +1,40 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { EditorContent, useEditor } from '@tiptap/react';
+import { useEffect, useMemo, useState } from 'react';
+import { EditorContent, useEditor, useEditorState } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { TextStyle } from '@tiptap/extension-text-style';
-import Color from '@tiptap/extension-color';
-import TextAlign from '@tiptap/extension-text-align';
-import Image from '@tiptap/extension-image';
-import { Table, TableRow, TableCell, TableHeader } from '@tiptap/extension-table';
-import Youtube from '@tiptap/extension-youtube';
-import { Node } from '@tiptap/core';
 import {
-  faAlignCenter,
-  faAlignJustify,
-  faAlignLeft,
-  faAlignRight,
   faBold,
   faCode,
   faItalic,
-  faLink,
   faListOl,
   faListUl,
-  faOutdent,
-  faIndent,
-  faTable,
-  faUnderline,
-  faImage,
-  faVideo,
+  faParagraph,
+  faHeading,
   faRotateLeft,
   faRotateRight,
-  faLinkSlash,
 } from '@fortawesome/free-solid-svg-icons';
 import IconButton from './IconButton';
 import { sanitizeRichTextHtml } from './richTextSanitize';
 
-const ALLOWED_VIDEO_HOSTS = ['youtube.com', 'www.youtube.com', 'youtu.be', 'player.vimeo.com', 'vimeo.com'];
-
-const Iframe = Node.create({
-  name: 'iframe',
-  group: 'block',
-  atom: true,
-  selectable: true,
-  draggable: true,
-  addAttributes() {
-    return {
-      src: { default: null },
-      width: { default: '640' },
-      height: { default: '360' },
-      frameborder: { default: '0' },
-      allow: { default: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture' },
-      allowfullscreen: { default: 'true' },
-      title: { default: 'Video embed' },
-    };
-  },
-  parseHTML() {
-    return [{ tag: 'iframe' }];
-  },
-  renderHTML({ HTMLAttributes }) {
-    return ['iframe', HTMLAttributes];
-  },
-  addCommands() {
-    return {
-      setIframe:
-        (attrs) =>
-        ({ commands }) =>
-          commands.insertContent({ type: this.name, attrs }),
-    };
-  },
-});
-
-function normalizeVideoUrl(url) {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    if (!ALLOWED_VIDEO_HOSTS.includes(host)) {
-      return null;
-    }
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function RichTextEditor({ value, onChange }) {
+// Editor of a case write-up, limited to what the content standard allows: sections (h2), paragraphs, bold subtitles
+// and item labels, italic, bulleted and numbered lists. "Seção" inserts one of the fixed section names of the
+// language being edited, so the titles never drift from the standard.
+function RichTextEditor({ value, onChange, sections = [], label }) {
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceHtml, setSourceHtml] = useState(value || '');
-  const [currentColor, setCurrentColor] = useState('#1f2937');
-  const lastEditorHtmlRef = useRef(sanitizeRichTextHtml(value || ''));
 
   const extensions = useMemo(
     () => [
       StarterKit.configure({
-        heading: { levels: [1, 2, 3] },
+        heading: { levels: [2] },
+        blockquote: false,
+        code: false,
+        codeBlock: false,
+        horizontalRule: false,
+        hardBreak: false,
+        strike: false,
+        underline: false,
+        link: false,
       }),
-      TextStyle,
-      Color,
-      TextAlign.configure({ types: ['heading', 'paragraph'] }),
-      Image.configure({ inline: false }),
-      Table.configure({ resizable: true }),
-      TableRow,
-      TableCell,
-      TableHeader,
-      Youtube.configure({
-        controls: true,
-        nocookie: false,
-      }),
-      Iframe,
     ],
     []
   );
@@ -112,212 +43,104 @@ function RichTextEditor({ value, onChange }) {
     extensions,
     content: sanitizeRichTextHtml(value || ''),
     editorProps: {
-      attributes: {
-        class: 'rich-editor-content',
-      },
-      handleKeyDown(view, event) {
-        if (event.key === 'Tab') {
-          if (event.shiftKey) {
-            if (editor?.can().liftListItem('listItem')) {
-              event.preventDefault();
-              return editor.chain().focus().liftListItem('listItem').run();
-            }
-            return false;
-          }
-          if (editor?.can().sinkListItem('listItem')) {
-            event.preventDefault();
-            return editor.chain().focus().sinkListItem('listItem').run();
-          }
-        }
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
-          event.preventDefault();
-          return editor?.chain().focus().redo().run() || false;
-        }
-        return false;
-      },
+      attributes: { class: 'rich-editor-content', 'aria-label': label || 'Descrição' },
     },
     onUpdate({ editor: nextEditor }) {
       const html = sanitizeRichTextHtml(nextEditor.getHTML());
-      lastEditorHtmlRef.current = html;
-      if (html !== sanitizeRichTextHtml(value || '')) {
-        onChange(html);
-      }
-      if (!sourceMode) {
-        setSourceHtml(html);
-      }
+      if (html !== sanitizeRichTextHtml(value || '')) onChange(html);
     },
+  });
+
+  const active = useEditorState({
+    editor,
+    selector: ({ editor: current }) => ({
+      heading: current?.isActive('heading', { level: 2 }) ?? false,
+      bold: current?.isActive('bold') ?? false,
+      italic: current?.isActive('italic') ?? false,
+      bullet: current?.isActive('bulletList') ?? false,
+      ordered: current?.isActive('orderedList') ?? false,
+    }),
   });
 
   useEffect(() => {
     if (!editor) return;
     const incoming = sanitizeRichTextHtml(value || '');
-    const current = sanitizeRichTextHtml(editor.getHTML());
-    if (incoming !== current && !editor.isFocused) {
-      editor.commands.setContent(incoming, false);
-      lastEditorHtmlRef.current = incoming;
+    if (incoming !== sanitizeRichTextHtml(editor.getHTML()) && !editor.isFocused) {
+      editor.commands.setContent(incoming, { emitUpdate: false });
     }
-    if (!sourceMode) {
-      setSourceHtml(incoming);
-    }
-  }, [editor, value, sourceMode]);
+  }, [editor, value]);
+
+  const run = (command) => () => command(editor?.chain().focus())?.run();
+
+  const insertSection = (event) => {
+    const name = event.target.value;
+    event.target.value = '';
+    if (!name || !editor) return;
+    editor.chain().focus().insertContent(`<h2>${name}</h2><p></p>`).run();
+  };
 
   const applySourceHtml = () => {
     if (!editor) return;
     const sanitized = sanitizeRichTextHtml(sourceHtml);
-    editor.commands.setContent(sanitized, false);
+    editor.commands.setContent(sanitized, { emitUpdate: false });
     onChange(sanitized);
+    setSourceMode(false);
   };
-
-  const setParagraphStyle = (event) => {
-    const value = event.target.value;
-    if (!editor) return;
-    if (value === 'paragraph') {
-      editor.chain().focus().setParagraph().run();
-      return;
-    }
-    const level = Number(value.replace('h', ''));
-    if ([1, 2, 3].includes(level)) {
-      editor.chain().focus().toggleHeading({ level }).run();
-    }
-  };
-
-  const setLink = () => {
-    if (!editor) return;
-    const previous = editor.getAttributes('link').href || '';
-    const url = window.prompt('Informe a URL do link', previous);
-    if (url === null) return;
-    if (!url.trim()) {
-      editor.chain().focus().unsetLink().run();
-      return;
-    }
-    editor.chain().focus().extendMarkRange('link').setLink({ href: url.trim() }).run();
-  };
-
-  const insertImage = () => {
-    if (!editor) return;
-    const src = window.prompt('Informe a URL da imagem');
-    if (!src?.trim()) return;
-    editor.chain().focus().setImage({ src: src.trim() }).run();
-  };
-
-  const insertVideo = () => {
-    if (!editor) return;
-    const raw = window.prompt('Informe URL do vídeo (YouTube ou Vimeo)');
-    if (!raw?.trim()) return;
-
-    const normalized = normalizeVideoUrl(raw.trim());
-    if (!normalized) {
-      window.alert('URL inválida. Apenas YouTube ou Vimeo.');
-      return;
-    }
-
-    const hostname = new URL(normalized).hostname.toLowerCase();
-    if (hostname.includes('youtube') || hostname.includes('youtu.be')) {
-      editor.chain().focus().setYoutubeVideo({ src: normalized, width: 640, height: 360 }).run();
-      return;
-    }
-
-    editor
-      .chain()
-      .focus()
-      .setIframe({
-        src: normalized,
-        width: '640',
-        height: '360',
-      })
-      .run();
-  };
-
-  const currentBlockType = editor?.isActive('heading', { level: 1 })
-    ? 'h1'
-    : editor?.isActive('heading', { level: 2 })
-      ? 'h2'
-      : editor?.isActive('heading', { level: 3 })
-        ? 'h3'
-        : 'paragraph';
 
   return (
-    <div className="rich-editor-shell">
-      <div className="rich-toolbar">
-        <select className="rich-select" value={currentBlockType} onChange={setParagraphStyle}>
-          <option value="paragraph">Parágrafo</option>
-          <option value="h1">Heading 1</option>
-          <option value="h2">Heading 2</option>
-          <option value="h3">Heading 3</option>
-        </select>
-
-        <IconButton icon={faBold} iconOnly ariaLabel="Negrito" onClick={() => editor?.chain().focus().toggleBold().run()} />
-        <IconButton icon={faItalic} iconOnly ariaLabel="Itálico" onClick={() => editor?.chain().focus().toggleItalic().run()} />
-        <IconButton icon={faUnderline} iconOnly ariaLabel="Sublinhado" onClick={() => editor?.chain().focus().toggleUnderline().run()} />
-
-        <label className="color-picker-label" aria-label="Cor do texto">
-          A
-          <input
-            type="color"
-            value={currentColor}
-            onChange={(event) => {
-              const color = event.target.value;
-              setCurrentColor(color);
-              editor?.chain().focus().setColor(color).run();
-            }}
-          />
-        </label>
-
-        <IconButton icon={faAlignLeft} iconOnly ariaLabel="Alinhar à esquerda" onClick={() => editor?.chain().focus().setTextAlign('left').run()} />
-        <IconButton icon={faAlignCenter} iconOnly ariaLabel="Alinhar ao centro" onClick={() => editor?.chain().focus().setTextAlign('center').run()} />
-        <IconButton icon={faAlignRight} iconOnly ariaLabel="Alinhar à direita" onClick={() => editor?.chain().focus().setTextAlign('right').run()} />
-        <IconButton icon={faAlignJustify} iconOnly ariaLabel="Justificar" onClick={() => editor?.chain().focus().setTextAlign('justify').run()} />
-
-        <IconButton icon={faLink} iconOnly ariaLabel="Inserir link" onClick={setLink} />
-        <IconButton icon={faLinkSlash} iconOnly ariaLabel="Remover link" onClick={() => editor?.chain().focus().unsetLink().run()} />
-        <IconButton icon={faImage} iconOnly ariaLabel="Inserir imagem" onClick={insertImage} />
-        <IconButton icon={faVideo} iconOnly ariaLabel="Inserir vídeo" onClick={insertVideo} />
-
-        <details className="more-menu">
-          <summary className="more-menu-trigger" aria-label="Mais opcoes">
-            ⋯
-          </summary>
-          <div className="more-menu-content">
-            <IconButton icon={faListUl} onClick={() => editor?.chain().focus().toggleBulletList().run()}>
-              Lista não ordenada
-            </IconButton>
-            <IconButton icon={faListOl} onClick={() => editor?.chain().focus().toggleOrderedList().run()}>
-              Lista ordenada
-            </IconButton>
-            <IconButton icon={faIndent} onClick={() => editor?.chain().focus().sinkListItem('listItem').run()}>
-              Indentar
-            </IconButton>
-            <IconButton icon={faOutdent} onClick={() => editor?.chain().focus().liftListItem('listItem').run()}>
-              Outdent
-            </IconButton>
-            <IconButton icon={faTable} onClick={() => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}>
-              Inserir tabela
-            </IconButton>
-            <IconButton icon={faTable} onClick={() => editor?.chain().focus().deleteTable().run()}>
-              Remover tabela
-            </IconButton>
-          </div>
-        </details>
-
-        <IconButton icon={faRotateLeft} iconOnly ariaLabel="Undo" onClick={() => editor?.chain().focus().undo().run()} />
-        <IconButton icon={faRotateRight} iconOnly ariaLabel="Redo" onClick={() => editor?.chain().focus().redo().run()} />
+    <div className="rich-editor">
+      <div className="rich-toolbar" role="toolbar" aria-label="Formatação">
+        <IconButton icon={faParagraph} iconOnly variant="ghost" ariaLabel="Parágrafo" onClick={run((c) => c.setParagraph())} disabled={sourceMode} />
+        <IconButton icon={faHeading} iconOnly variant="ghost" ariaLabel="Título de seção" aria-pressed={active?.heading} onClick={run((c) => c.toggleHeading({ level: 2 }))} disabled={sourceMode} />
+        <span className="rich-toolbar__gap" aria-hidden="true" />
+        <IconButton icon={faBold} iconOnly variant="ghost" ariaLabel="Negrito (subtítulos e rótulos)" aria-pressed={active?.bold} onClick={run((c) => c.toggleBold())} disabled={sourceMode} />
+        <IconButton icon={faItalic} iconOnly variant="ghost" ariaLabel="Itálico" aria-pressed={active?.italic} onClick={run((c) => c.toggleItalic())} disabled={sourceMode} />
+        <span className="rich-toolbar__gap" aria-hidden="true" />
+        <IconButton icon={faListUl} iconOnly variant="ghost" ariaLabel="Lista" aria-pressed={active?.bullet} onClick={run((c) => c.toggleBulletList())} disabled={sourceMode} />
+        <IconButton icon={faListOl} iconOnly variant="ghost" ariaLabel="Lista numerada" aria-pressed={active?.ordered} onClick={run((c) => c.toggleOrderedList())} disabled={sourceMode} />
+        <span className="rich-toolbar__gap" aria-hidden="true" />
+        <IconButton icon={faRotateLeft} iconOnly variant="ghost" ariaLabel="Desfazer" onClick={run((c) => c.undo())} disabled={sourceMode} />
+        <IconButton icon={faRotateRight} iconOnly variant="ghost" ariaLabel="Refazer" onClick={run((c) => c.redo())} disabled={sourceMode} />
+        {sections.length ? (
+          <span className="select rich-toolbar__sections">
+            <select aria-label="Inserir seção do padrão" defaultValue="" onChange={insertSection} disabled={sourceMode}>
+              <option value="">Inserir seção…</option>
+              {sections.map((name) => (
+                <option key={name} value={name.replace('?', '')}>
+                  {name.replace('?', '')}
+                  {name.endsWith('?') ? ' (opcional)' : ''}
+                </option>
+              ))}
+            </select>
+          </span>
+        ) : null}
         <IconButton
           icon={faCode}
           iconOnly
-          ariaLabel="Alternar modo HTML"
-          onClick={() => setSourceMode((state) => !state)}
-          className={sourceMode ? 'active' : ''}
+          variant="ghost"
+          ariaLabel="Editar o HTML"
+          aria-pressed={sourceMode}
+          className="rich-toolbar__source"
+          onClick={() => {
+            if (!sourceMode) setSourceHtml(sanitizeRichTextHtml(value || ''));
+            setSourceMode(!sourceMode);
+          }}
         />
       </div>
 
       {sourceMode ? (
-        <div className="source-mode-wrap">
+        <div className="rich-source">
           <textarea
-            className="source-editor"
+            className="input rich-source__text"
             value={sourceHtml}
+            spellCheck={false}
+            aria-label="HTML da descrição"
             onChange={(event) => setSourceHtml(event.target.value)}
           />
-          <div className="source-actions">
+          <div className="rich-source__actions">
+            <IconButton variant="outline" onClick={() => setSourceMode(false)}>
+              Cancelar
+            </IconButton>
             <IconButton icon={faCode} variant="primary" onClick={applySourceHtml}>
               Aplicar HTML
             </IconButton>
